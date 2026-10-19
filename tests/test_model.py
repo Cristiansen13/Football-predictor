@@ -80,31 +80,79 @@ def test_fit_only_uses_matches_before_as_of(league):
     np.testing.assert_allclose(model.attack_, again.attack_)
 
 
-def test_analytic_gradient_matches_finite_differences(league):
-    data, _ = league
-    features = build_features(data[data["season"] == 2022])
-    model = DixonColesModel.from_preset("form", xi=0.004).fit(features)
+@pytest.mark.parametrize("xg_weight", [0.0, 0.5])
+def test_analytic_gradient_matches_finite_differences(xg_weight):
+    data = simulate_league(seasons=[2021, 2022], second_division_teams=20, seed=4)
+    features = build_features(data)
+    model = DixonColesModel.from_preset("form", xi=0.004, xg_weight=xg_weight).fit(features)
     played = features.dropna(subset=["home_goals"])
     weights = time_decay_weights(played["kickoff"], model.summary_.as_of, model.xi)
-    index = model.team_index_
-    design = {
-        "n_teams": len(index),
-        "home": played["home_team"].map(index).to_numpy(),
-        "away": played["away_team"].map(index).to_numpy(),
-        "x": played["home_goals"].to_numpy(float),
-        "y": played["away_goals"].to_numpy(float),
-        "weights": weights,
-        "total_weight": weights.sum(),
-        "att_home": model._feature_block(played, "home", model.attack_features),
-        "att_away": model._feature_block(played, "away", model.attack_features),
-        "def_home": model._feature_block(played, "home", model.defence_features),
-        "def_away": model._feature_block(played, "away", model.defence_features),
-    }
+    design = model._design(played, weights)
+    assert design["n_div"] == 2
+    assert (design["alpha"] > 0).sum() == (xg_weight > 0) * played["home_xg"].notna().sum()
     rng = np.random.default_rng(0)
-    params = rng.normal(0, 0.15, 3 + 2 * (len(index) - 1) + 2)
-    params[2] = -0.08
+    params = rng.normal(0, 0.15, 2 * 2 + 1 + 2 * (design["n_teams"] - 1) + 2)
+    params[4] = -0.08  # rho
     numeric = approx_fprime(params, lambda p: model._objective(p, design)[0], 1e-7)
     np.testing.assert_allclose(model._objective(params, design)[1], numeric, atol=1e-5)
+
+
+def test_xg_weighting_tracks_true_strength_better(league):
+    data, truth = league
+    as_of = data["kickoff"].iloc[-1]
+    goals_only = DixonColesModel(xi=0.004).fit(data, as_of=as_of)
+    with_xg = DixonColesModel(xi=0.004, xg_weight=0.6).fit(data, as_of=as_of)
+    true_rating = (truth.attack.iloc[-1] - truth.defence.iloc[-1])
+
+    def correlation(model):
+        fitted = model.ratings().set_index("team")["rating"]
+        return np.corrcoef(fitted, true_rating.reindex(fitted.index))[0, 1]
+
+    assert correlation(with_xg) > correlation(goals_only)
+
+
+def test_divisions_share_one_strength_scale():
+    data, truth = simulate_league(seasons=range(2018, 2023), second_division_teams=20, seed=8, return_truth=True)
+    model = DixonColesModel(xi=0.003, xg_weight=0.3).fit(data)
+    assert set(model.summary_.divisions) == {"E0", "E1"}
+    assert model.default_division_ == "E0"
+    # Each division keeps its own scoring level; the truth has a single one.
+    assert model.division_intercepts_["E0"] == pytest.approx(model.division_intercepts_["E1"], abs=0.15)
+    fitted = model.ratings().set_index("team")["rating"]
+    true_rating = (truth.attack.iloc[-1] - truth.defence.iloc[-1]).reindex(fitted.index)
+    assert np.corrcoef(fitted, true_rating)[0, 1] > 0.9
+    # Clubs currently in E0 are rated above those in E1 on the shared scale.
+    last = data[data["season"] == 2022]
+    top = set(last.loc[last["division"] == "E0", "home_team"])
+    assert fitted[fitted.index.isin(top)].mean() > fitted[~fitted.index.isin(top)].mean()
+
+
+def test_second_division_data_rates_promoted_clubs():
+    """Promoted clubs' strength relative to the incumbents is closer to the truth
+    when Championship matches are in the training data."""
+    errors = {}
+    for name, keep in (("E0 only", ["E0"]), ("with E1", ["E0", "E1"])):
+        gaps = []
+        for seed in (1, 2, 3):
+            data, truth = simulate_league(seasons=range(2018, 2023), second_division_teams=20, seed=seed,
+                                          return_truth=True)
+            start = data.loc[data["season"] == 2022, "kickoff"].min()
+            now = set(data.loc[(data["season"] == 2022) & (data["division"] == "E0"), "home_team"])
+            before = set(data.loc[(data["season"] == 2021) & (data["division"] == "E0"), "home_team"])
+            promoted, incumbents = sorted(now - before), sorted(now & before)
+            model = DixonColesModel(xi=0.003).fit(data[data["division"].isin(keep)], as_of=start)
+
+            def fitted(teams):
+                attack, defence = model._team_strengths(pd.Series(teams))
+                return attack - defence
+
+            snapshot = truth.attack.index[truth.attack.index <= start][-1]
+            true = truth.attack.loc[snapshot] - truth.defence.loc[snapshot]
+            fitted_gap = fitted(promoted) - fitted(incumbents).mean()
+            true_gap = true[promoted].to_numpy() - true[incumbents].mean()
+            gaps.append(np.abs(fitted_gap - true_gap).mean())
+        errors[name] = np.mean(gaps)
+    assert errors["with E1"] < errors["E0 only"]
 
 
 def test_predict_outputs_and_unseen_teams(league):

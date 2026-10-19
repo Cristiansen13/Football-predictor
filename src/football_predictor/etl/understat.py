@@ -9,6 +9,7 @@ requested from its AJAX endpoints instead.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
@@ -22,6 +23,8 @@ MATCH_URL = "https://understat.com/match/{match_id}"
 LEAGUE_API_URL = "https://understat.com/getLeagueData/EPL/{season}"
 MATCH_API_URL = "https://understat.com/getMatchData/{match_id}"
 AJAX_HEADERS = {"X-Requested-With": "XMLHttpRequest"}
+
+log = logging.getLogger(__name__)
 
 _JS_ESCAPE = re.compile(r"\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|.)", re.S)
 _SIMPLE_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
@@ -49,16 +52,25 @@ def extract_json_var(html: str, var_name: str) -> Any:
     return json.loads(_unescape_js_string(match.group("data")))
 
 
+def _ajax(client: HttpClient, url: str, referer: str, **kwargs) -> Any:
+    """Understat's own data endpoint; it expects an XHR from the page it serves."""
+    headers = {**AJAX_HEADERS, "Referer": referer}
+    return json.loads(client.get_text(url, headers=headers, allow_fallback=False, **kwargs))
+
+
 def _league_payload(client: HttpClient, season: int, **kwargs) -> dict[str, Any]:
-    html = client.get_text(LEAGUE_URL.format(season=season), **kwargs)
+    page = LEAGUE_URL.format(season=season)
+    html = client.get_text(page, **kwargs)
     try:
         return {
             "dates": extract_json_var(html, "datesData"),
             "teams": extract_json_var(html, "teamsData"),
         }
     except ValueError:
-        text = client.get_text(LEAGUE_API_URL.format(season=season), headers=AJAX_HEADERS, **kwargs)
-        return json.loads(text)
+        payload = _ajax(client, LEAGUE_API_URL.format(season=season), page, **kwargs)
+        if not {"dates", "teams"} <= set(payload):
+            raise ValueError(f"Unexpected Understat league payload keys: {sorted(payload)}")
+        return payload
 
 
 def fetch_league(client: HttpClient, season: int, **kwargs) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -66,18 +78,20 @@ def fetch_league(client: HttpClient, season: int, **kwargs) -> tuple[pd.DataFram
     payload = _league_payload(client, season, **kwargs)
     matches = parse_league_matches(payload["dates"], season)
     history = parse_team_history(payload["teams"])
-    return matches, link_team_history(matches, history)
+    linked = link_team_history(matches, history)
+    if len(linked) < len(history):
+        log.warning("understat %s: %d of %d team-match rows matched no fixture",
+                    season, len(history) - len(linked), len(history))
+    return matches, linked
 
 
 def fetch_match_rosters(client: HttpClient, understat_id: str, **kwargs) -> pd.DataFrame:
-    html = client.get_text(MATCH_URL.format(match_id=understat_id), **kwargs)
+    page = MATCH_URL.format(match_id=understat_id)
+    html = client.get_text(page, **kwargs)
     try:
         rosters = extract_json_var(html, "rostersData")
     except ValueError:
-        text = client.get_text(
-            MATCH_API_URL.format(match_id=understat_id), headers=AJAX_HEADERS, **kwargs
-        )
-        rosters = json.loads(text)["rosters"]
+        rosters = _ajax(client, MATCH_API_URL.format(match_id=understat_id), page, **kwargs)["rosters"]
     return parse_match_rosters(rosters, understat_id)
 
 

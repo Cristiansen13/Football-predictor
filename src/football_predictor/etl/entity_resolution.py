@@ -116,7 +116,7 @@ def normalize_team_name(name: str) -> str:
 
 
 # Clubs that have played in the Premier League since 2000/01, canonical spelling.
-CANONICAL_TEAMS = [
+PREMIER_LEAGUE_TEAMS = [
     "Arsenal", "Aston Villa", "Barnsley", "Birmingham City", "Blackburn Rovers",
     "Blackpool", "Bolton Wanderers", "Bournemouth", "Bradford City", "Brentford",
     "Brighton and Hove Albion", "Burnley", "Cardiff City", "Charlton Athletic",
@@ -131,6 +131,17 @@ CANONICAL_TEAMS = [
     "Wolverhampton Wanderers",
 ]
 
+# Other Championship clubs since 2005/06, needed to rate promoted sides.
+CHAMPIONSHIP_TEAMS = [
+    "Bristol City", "Burton Albion", "Colchester United", "Crewe Alexandra",
+    "Doncaster Rovers", "Gillingham", "Milton Keynes Dons", "Millwall",
+    "Oxford United", "Peterborough United", "Plymouth Argyle", "Preston North End",
+    "Rotherham United", "Scunthorpe United", "Southend United", "Wrexham",
+    "Wycombe Wanderers", "Yeovil Town",
+]
+
+CANONICAL_TEAMS = PREMIER_LEAGUE_TEAMS + CHAMPIONSHIP_TEAMS
+
 # Nicknames and abbreviations that no string metric can recover.
 TEAM_ALIASES = {
     "Wolverhampton Wanderers": ["Wolves"],
@@ -141,6 +152,7 @@ TEAM_ALIASES = {
     "West Bromwich Albion": ["West Brom"],
     "Nottingham Forest": ["Forest"],
     "Wigan Athletic": ["Wigan"],
+    "Milton Keynes Dons": ["MK Dons"],
 }
 
 
@@ -169,11 +181,18 @@ class FuzzyMatcher:
         normalizer: Callable[[str], str] = basic_normalize,
         threshold: float = 0.85,
         ambiguity_margin: float = 0.03,
+        create_below: float = 0.75,
     ) -> None:
+        """
+        ``create_below``: with ``create_missing=True`` a new entity is only
+        registered when no existing one scores at least this much, so a
+        near-miss or ambiguous spelling raises instead of creating a duplicate.
+        """
         self.kind = kind
         self.normalizer = normalizer
         self.threshold = threshold
         self.ambiguity_margin = ambiguity_margin
+        self.create_below = create_below
         self._keys: dict[str, str] = {}  # normalised key -> canonical name
         self._canonical: dict[str, str] = {}  # canonical name -> entity id
         self._cache: dict[str, Resolution] = {}
@@ -228,7 +247,7 @@ class FuzzyMatcher:
                 result = Resolution(name, top_name, self._canonical[top_name], top_score, "fuzzy")
                 # Remember the spelling so later lookups are exact.
                 self._keys[key] = top_name
-            elif create_missing:
+            elif create_missing and top_score < self.create_below:
                 entity_id = self.add_entity(name)
                 result = Resolution(name, name, entity_id, 1.0, "created")
             else:

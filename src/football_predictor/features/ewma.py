@@ -56,12 +56,17 @@ def time_decayed_ewma(
             seconds = group["kickoff"].to_numpy().astype("datetime64[s]").astype(np.int64)
             rows = position.loc[group.index].to_numpy()
             weighted_sum = weight = 0.0
+            # Results at the current timestamp are held back until every row at
+            # that timestamp has its feature, so duplicated or mistimed rows
+            # never see each other.
+            pending_sum = pending_weight = 0.0
             last = None
             for i in range(len(group)):
-                if last is not None:
+                if last is not None and seconds[i] != last:
                     factor = np.exp(-decay_rate * (seconds[i] - last))
-                    weighted_sum *= factor
-                    weight *= factor
+                    weighted_sum = (weighted_sum + pending_sum) * factor
+                    weight = (weight + pending_weight) * factor
+                    pending_sum = pending_weight = 0.0
                 last = seconds[i]
                 p = prior[rows[i]]
                 if np.isnan(p):
@@ -69,7 +74,7 @@ def time_decayed_ewma(
                 else:
                     result[rows[i]] = (weighted_sum + prior_weight * p) / (weight + prior_weight)
                 if played[i] and not np.isnan(values[i]):
-                    weighted_sum += values[i]
-                    weight += 1.0
+                    pending_sum += values[i]
+                    pending_weight += 1.0
         out[f"{prefix}{column}"] = result
     return out

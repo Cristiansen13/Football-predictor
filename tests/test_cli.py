@@ -1,8 +1,18 @@
+import json
+
+import pytest
+
+from football_predictor import cli
 from football_predictor.cli import main, parse_seasons
-from football_predictor.db import Database
-from football_predictor.etl.pipeline import Pipeline
 
 from . import fake_sources as fake
+
+
+@pytest.fixture()
+def offline(monkeypatch):
+    """Route the network commands to the fake sources, with 2023 as the current season."""
+    monkeypatch.setattr(cli, "make_client", lambda args: (fake.FakeClient(), None))
+    monkeypatch.setattr(cli, "current_season", lambda: fake.SEASON)
 
 
 def test_parse_seasons():
@@ -11,22 +21,52 @@ def test_parse_seasons():
 
 
 def test_demo_writes_reports(tmp_path, capsys):
-    main(["--data-dir", str(tmp_path), "demo", "--features", "form", "--refit-days", "28"])
+    main(["--data-dir", str(tmp_path), "demo", "--features", "form", "--xg-weight", "0.3",
+          "--refit-days", "28", "--compare"])
     out = capsys.readouterr().out
-    assert "brier_model" in out and "roi" in out
-    assert (tmp_path / "reports" / "pnl_2023.png").exists()
-    assert (tmp_path / "reports" / "bets_2023.csv").exists()
+    assert "Feature presets on season 2023" in out
+    assert "Forecast quality" in out and "brier_skill_vs_market" in out and "p_flat_roi_le_zero" in out
+    reports = tmp_path / "reports"
+    for name in ("pnl_2023.png", "calibration_2023.png", "bets_2023.csv", "metrics_2023.json", "comparison_2023.csv"):
+        assert (reports / name).exists(), name
+    assert json.loads((reports / "metrics_2023.json").read_text())["matches"] == 380
 
 
-def test_predict_from_warehouse(tmp_path, capsys):
-    db = Database(tmp_path / "football.db")
-    Pipeline(db, fake.FakeClient()).run([fake.SEASON], ["football_data", "understat"])
-    db.close()
+def test_ingest_status_and_predict(tmp_path, capsys, offline):
+    main(["--data-dir", str(tmp_path), "ingest", "--seasons", "2023", "--sources", "football_data",
+          "understat", "fbref"])  # returns normally: no source failed
+    out = capsys.readouterr().out
+    assert "E0" in out and "E1" in out and "FAILED" not in out
+
+    main(["--data-dir", str(tmp_path), "status", "--audit", "4"])
+    out = capsys.readouterr().out
+    assert "4 clubs, expected 20" in out
+    assert "every feature reproduced from pre-kickoff data only" in out
+
     main(["--data-dir", str(tmp_path), "predict", "Man City", "Wolves", "--as-of", "2023-09-30", "--l2", "2"])
     out = capsys.readouterr().out
     assert "Manchester City" in out and "Wolverhampton Wanderers" in out
     assert "Correct-score probabilities" in out
 
-    main(["--data-dir", str(tmp_path), "predict", "--upcoming", "30", "--as-of", "2023-09-10"])
+    main(["--data-dir", str(tmp_path), "predict", "--upcoming", "30", "--as-of", "2023-09-10", "--xg-weight", "0.3"])
     out = capsys.readouterr().out
     assert out.count("2023-09-16") == 2  # the two unplayed fixtures of the last round
+    assert "best_ev" in out and "stake_pct" in out  # priced from fixtures.csv
+
+
+def test_check_sources_reports_each_source(tmp_path, capsys, offline):
+    main(["--data-dir", str(tmp_path), "check-sources", "--season", "2023",
+          "--sources", "football_data", "understat", "fbref"])  # returns normally: everything parsed
+    out = capsys.readouterr().out
+    for source in ("football_data:E0", "football_data:E1", "understat", "fbref"):
+        assert f"OK   {source}" in out
+
+
+def test_check_sources_exits_non_zero_on_failure(tmp_path, capsys, monkeypatch, offline):
+    broken = fake.FakeClient()
+    broken.pages = {url: text for url, text in broken.pages.items() if "understat" not in url}
+    monkeypatch.setattr(cli, "make_client", lambda args: (broken, None))
+    with pytest.raises(SystemExit) as failed:
+        main(["--data-dir", str(tmp_path), "check-sources", "--season", "2023", "--sources", "understat"])
+    assert failed.value.code == 1
+    assert "FAIL understat" in capsys.readouterr().out

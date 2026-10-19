@@ -73,6 +73,35 @@ def football_data_csv() -> str:
     return "\n".join(lines) + "\n,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n"  # trailing blank row like the real files
 
 
+# Championship: two known clubs under Football-Data spellings, one abbreviated
+# ("Peterboro") and one club that is in no register yet.
+CHAMPIONSHIP = ["Leeds", "Sheffield Weds", "Peterboro", "Newtown Rangers"]
+CHAMPIONSHIP_CANONICAL = ["Leeds United", "Sheffield Wednesday", "Peterborough United", "Newtown Rangers"]
+
+
+def championship_csv() -> str:
+    """Double round robin with two matches per round and no club twice in a round."""
+    lines = ["\ufeffDiv,Date,Time,HomeTeam,AwayTeam,FTHG,FTAG,FTR,AvgH,AvgD,AvgA"]
+    day = pd.Timestamp("2023-08-05 15:00")
+    rounds = [[(0, 1), (2, 3)], [(0, 2), (1, 3)], [(0, 3), (1, 2)]]
+    rounds += [[(a, h) for h, a in pairs] for pairs in rounds]
+    for k, (h, a) in enumerate(pair for pairs in rounds for pair in pairs):
+        kickoff = day + pd.Timedelta(days=7 * (k // 2))
+        lines.append(f"E1,{kickoff:%d/%m/%Y},{kickoff:%H:%M},{CHAMPIONSHIP[h]},{CHAMPIONSHIP[a]},"
+                     f"{k % 3},{(k + 1) % 2},H,2.4,3.3,3.0")
+    return "\n".join(lines) + "\n"
+
+
+def fixtures_csv() -> str:
+    """Football-Data's weekly fixtures list: the two unplayed matches, plus a Scottish one."""
+    return (
+        "Div,Date,Time,HomeTeam,AwayTeam,B365H,B365D,B365A,PSH,PSD,PSA,AvgH,AvgD,AvgA\n"
+        "E0,16/09/2023,15:00,Wolves,Man United,3.10,3.50,2.30,3.20,3.55,2.35,3.05,3.45,2.28\n"
+        "E0,16/09/2023,17:00,Nott'm Forest,Man City,9.00,5.50,1.33,9.50,5.60,1.35,8.80,5.40,1.32\n"
+        "SC0,16/09/2023,15:00,Celtic,Rangers,1.80,3.80,4.20,1.82,3.85,4.30,1.79,3.75,4.10\n"
+    )
+
+
 # -- Understat -----------------------------------------------------------------
 
 
@@ -236,13 +265,23 @@ def sofifa_players_html(players: list[tuple[str, str, str, int]]) -> str:
 
 
 class FakeClient:
-    def __init__(self) -> None:
+    def __init__(self, *, understat_api: bool = False) -> None:
+        """``understat_api``: serve the league data only through Understat's JSON
+        endpoint, as when the page stops embedding it."""
         label = season_label(SEASON)
         self.pages = {
-            f"https://www.football-data.co.uk/mmz4281/2324/E0.csv": football_data_csv(),
+            "https://www.football-data.co.uk/mmz4281/2324/E0.csv": football_data_csv(),
+            "https://www.football-data.co.uk/mmz4281/2324/E1.csv": championship_csv(),
+            "https://www.football-data.co.uk/fixtures.csv": fixtures_csv(),
             understat.LEAGUE_URL.format(season=SEASON): understat_league_html(),
             fbref.SCHEDULE_URL.format(label=label): fbref_schedule_html(),
         }
+        if understat_api:
+            dates, teams = understat_payload()
+            self.pages[understat.LEAGUE_URL.format(season=SEASON)] = "<html><body>loading...</body></html>"
+            self.pages[understat.LEAGUE_API_URL.format(season=SEASON)] = json.dumps(
+                {"dates": dates, "teams": teams, "players": []}
+            )
         for k in range(12):
             self.pages[understat.MATCH_URL.format(match_id=22000 + k)] = understat_match_html(str(22000 + k))
         for team, (squad_id, slug) in SQUADS.items():
@@ -255,7 +294,7 @@ class FakeClient:
         self.requested: list[str] = []
 
     def get_text(self, url: str, **kwargs) -> str:
-        self.requested.append(url)
+        self.requested.append((url, kwargs.get("headers")) if kwargs.get("headers") else url)
         if url not in self.pages:
             raise AssertionError(f"Unexpected request: {url}")
         return self.pages[url]

@@ -1,3 +1,4 @@
+import json
 from functools import partial
 
 import numpy as np
@@ -6,7 +7,11 @@ import pytest
 
 from football_predictor.evaluation import (
     BettingStrategy,
+    accuracy,
+    bootstrap_interval,
     brier_score,
+    calibration_table,
+    expected_calibration_error,
     expected_value,
     implied_probabilities,
     kelly_fraction,
@@ -15,7 +20,10 @@ from football_predictor.evaluation import (
     plot_pnl,
     ranked_probability_score,
     run_backtest,
+    save_report,
     simulate_betting,
+    skill_score,
+    tune_hyperparameters,
     tune_xi,
     walk_forward_predictions,
 )
@@ -120,4 +128,56 @@ def test_tune_xi_ranks_candidates(league):
     end = league.loc[league["season"] == 2022, "kickoff"].min().normalize()
     scores = tune_xi(league[league["kickoff"] < end], [0.0005, 0.003], start, end, refit_days=28)
     assert list(scores.columns[:2]) == ["xi", "matches"]
+    assert scores["brier_model"].is_monotonic_increasing
+
+
+def test_calibration_metrics():
+    rng = np.random.default_rng(0)
+    probabilities = rng.dirichlet([4, 2.5, 3], size=4000)
+    outcomes = np.array([rng.choice(3, p=p) for p in probabilities])
+    assert expected_calibration_error(probabilities, outcomes) < 0.03  # calibrated by construction
+    overconfident = probabilities ** 3 / (probabilities ** 3).sum(axis=1, keepdims=True)
+    assert expected_calibration_error(overconfident, outcomes) > 0.05
+    table = calibration_table(probabilities, outcomes, bins=5)
+    assert set(table["outcome"]) == {"home", "draw", "away"}
+    assert table.groupby("outcome")["count"].sum().eq(4000).all()
+    assert accuracy(np.array([[0.6, 0.3, 0.1], [0.2, 0.3, 0.5]]), np.array([0, 1])) == 0.5
+
+
+def test_bootstrap_interval_covers_the_mean():
+    values = np.random.default_rng(1).normal(0.2, 1.0, 500)
+    low, high, stats = bootstrap_interval(np.mean, values, n_resamples=500)
+    assert low < values.mean() < high and len(stats) == 500
+    assert skill_score(0.5, 0.6) == pytest.approx(1 / 6)
+
+
+def test_report_metrics_and_files(league, tmp_path):
+    start = league.loc[league["season"] == 2022, "kickoff"].min().normalize()
+    result = run_backtest(league, partial(DixonColesModel, xi=0.003), start, refit_days=28, n_resamples=200)
+    m = result.metrics
+    for key in ("accuracy_model", "ece_model", "score_log_loss_model", "brier_skill_vs_base_rate",
+                "brier_skill_vs_market", "brier_diff_ci_low", "flat_roi_ci_low", "p_flat_roi_le_zero",
+                "bets_home", "roi_away"):
+        assert key in m, key
+    assert m["brier_diff_ci_low"] <= m["brier_diff_vs_market"] <= m["brier_diff_ci_high"]
+    assert m["brier_skill_vs_base_rate"] > 0  # beats always forecasting the historical frequencies
+    assert m["bets_home"] + m["bets_draw"] + m["bets_away"] == m["bets"]
+    paths = save_report(result, tmp_path, "2022")
+    assert all(path.exists() for path in paths.values())
+    assert json.loads(paths["metrics"].read_text())["matches"] == 380
+
+
+def test_backtest_scores_only_requested_divisions():
+    data = simulate_league(seasons=[2021, 2022], second_division_teams=20, seed=3)
+    start = data.loc[data["season"] == 2022, "kickoff"].min().normalize()
+    predictions = walk_forward_predictions(data, DixonColesModel, start, refit_days=28, divisions=["E0"])
+    assert set(predictions["division"]) == {"E0"} and len(predictions) == 380
+
+
+def test_tune_hyperparameters_grid(league):
+    start = league.loc[league["season"] == 2021, "kickoff"].min().normalize()
+    end = league.loc[league["season"] == 2022, "kickoff"].min().normalize()
+    scores = tune_hyperparameters(league[league["kickoff"] < end], {"xi": [0.001, 0.004], "xg_weight": [0.0, 0.5]},
+                                  start, end, refit_days=56)
+    assert len(scores) == 4 and {"xi", "xg_weight", "brier_model"} <= set(scores.columns)
     assert scores["brier_model"].is_monotonic_increasing

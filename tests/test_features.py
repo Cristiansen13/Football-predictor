@@ -2,7 +2,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from football_predictor.features import build_features, fatigue_penalty, lineup_strength, schedule_fatigue, time_decayed_ewma
+from football_predictor.features import (
+    audit_point_in_time,
+    build_features,
+    fatigue_penalty,
+    lineup_strength,
+    schedule_fatigue,
+    time_decayed_ewma,
+)
 from football_predictor.features.builder import to_team_long
 from football_predictor.synthetic import simulate_league
 
@@ -129,3 +136,46 @@ def test_long_format_mirrors_sides():
     away = long[~long["is_home"]].reset_index(drop=True)
     np.testing.assert_array_equal(home["goals_for"], away["goals_against"])
     np.testing.assert_array_equal(home["xg_against"], away["xg_for"])
+
+
+def test_same_match_listed_twice_is_not_the_previous_fixture():
+    # Football-Data says 15:00, FBref's all-competition log says 12:30 for the same game.
+    long = pd.DataFrame(
+        {"team": ["A", "A"], "kickoff": pd.to_datetime(["2024-01-06 15:00", "2024-01-13 15:00"]), "is_home": [True, False]}
+    )
+    schedule = pd.DataFrame(
+        {"team": ["A", "A"], "kickoff": pd.to_datetime(["2024-01-06 12:30", "2024-01-13 12:30"]),
+         "venue": ["home", "away"]}
+    )
+    out = schedule_fatigue(long, schedule)
+    assert out.loc[1, "rest_days"] == pytest.approx(7.0)  # previous *distinct* match, not 2.5 h earlier
+    assert out.loc[1, "fatigue_penalty"] == 0.0
+
+
+def test_point_in_time_audit_passes_on_real_features():
+    data = simulate_league(seasons=[2021, 2022], second_division_teams=20, seed=2)
+    schedule = to_team_long(data)[["team", "kickoff"]].assign(
+        kickoff=lambda f: f["kickoff"] - pd.Timedelta(days=3), venue="away"
+    )  # a midweek cup tie before every league match
+    assert audit_point_in_time(data, schedule=schedule, sample=8).empty
+
+
+def test_point_in_time_audit_catches_leaks():
+    data = simulate_league(seasons=[2022], seed=2)
+
+    def leaky_builder(matches, **kwargs):
+        out = build_features(matches, **kwargs)
+        out["home_ewma_xg_for"] = out["home_xg"]  # the match's own xG
+        return out
+
+    problems = audit_point_in_time(data, sample=5, builder=leaky_builder)
+    assert set(problems["feature"]) == {"home_ewma_xg_for"}
+    assert problems["match_id"].nunique() == 5
+
+
+def test_ewma_ignores_rows_at_the_same_timestamp():
+    # A duplicated or mistimed row must not feed the other row at the same kickoff.
+    long = _long([1.0, 5.0, 2.0], [0, 7, 7])
+    out = time_decayed_ewma(long, ["x"], halflife_days=10, prior_weight=0)
+    assert out.loc[1, "ewma_x"] == pytest.approx(1.0)
+    assert out.loc[2, "ewma_x"] == pytest.approx(1.0)

@@ -49,6 +49,9 @@ def simulate_league(
     seasons: range | list[int] = range(2018, 2024),
     n_teams: int = 20,
     *,
+    second_division_teams: int = 0,
+    promoted: int = 3,
+    division_gap: float = 0.35,
     intercept: float = 0.12,
     home_advantage: float = 0.25,
     rho: float = -0.1,
@@ -60,69 +63,102 @@ def simulate_league(
     seed: int = 7,
     return_truth: bool = False,
 ):
+    """Simulate a top division ("E0") and optionally a second division ("E1").
+
+    With a second division, clubs there are ``division_gap`` weaker in both
+    attack and defence, the bottom ``promoted`` E0 clubs swap places with the
+    top ``promoted`` E1 clubs after every season, and E1 matches have no xG
+    (as on Understat).
+    """
     rng = np.random.default_rng(seed)
-    teams = [f"Team {i + 1:02d}" for i in range(n_teams)]
-    attack = rng.normal(0, strength_sd, n_teams)
-    defence = -0.7 * attack + rng.normal(0, strength_sd * 0.6, n_teams)  # good attacks tend to defend well
+    total = n_teams + second_division_teams
+    teams = [f"Team {i + 1:02d}" for i in range(total)]
+    attack = rng.normal(0, strength_sd, total)
+    defence = -0.7 * attack + rng.normal(0, strength_sd * 0.6, total)  # good attacks tend to defend well
+    attack[n_teams:] -= division_gap
+    defence[n_teams:] += division_gap
     attack -= attack.mean()
     defence -= defence.mean()
+    index = {t: i for i, t in enumerate(teams)}
+    members = {"E0": teams[:n_teams], "E1": teams[n_teams:]} if second_division_teams else {"E0": teams}
 
     rows, attack_path, defence_path = [], {}, {}
     match_number = 0
     for season in seasons:
-        rounds = round_robin(teams, rng)
+        schedules = {division: round_robin(clubs, rng) for division, clubs in members.items()}
+        points = {t: [0, 0] for t in teams}  # points, goal difference
         day = pd.Timestamp(f"{season}-08-10")
         day += pd.Timedelta(days=(5 - day.dayofweek) % 7)  # first Saturday
-        for r, fixtures in enumerate(rounds):
+        for r in range(max(len(rounds) for rounds in schedules.values())):
             # Every fifth round is a Tuesday fixture between two Saturdays.
             if r > 0:
                 midweek = r % 5 == 0
                 after_midweek = r > 1 and (r - 1) % 5 == 0
                 day += pd.Timedelta(days=3 if midweek else 4 if after_midweek else 7)
-            attack += rng.normal(0, weekly_drift_sd, n_teams)
-            defence += rng.normal(0, weekly_drift_sd, n_teams)
+            attack += rng.normal(0, weekly_drift_sd, total)
+            defence += rng.normal(0, weekly_drift_sd, total)
             attack -= attack.mean()
             defence -= defence.mean()
             attack_path[day] = attack.copy()
             defence_path[day] = defence.copy()
 
-            index = {t: i for i, t in enumerate(teams)}
-            h = np.array([index[a] for a, _ in fixtures])
-            a = np.array([index[b] for _, b in fixtures])
-            lam = np.exp(intercept + home_advantage + attack[h] + defence[a])
-            mu = np.exp(intercept + attack[a] + defence[h])
-            matrices = score_matrices(lam, mu, rho, max_goals=10)
-            probs = outcome_probabilities(matrices)
+            for division, rounds in schedules.items():
+                if r >= len(rounds):
+                    continue
+                fixtures = rounds[r]
+                h = np.array([index[a] for a, _ in fixtures])
+                a = np.array([index[b] for _, b in fixtures])
+                lam = np.exp(intercept + home_advantage + attack[h] + defence[a])
+                mu = np.exp(intercept + attack[a] + defence[h])
+                matrices = score_matrices(lam, mu, rho, max_goals=10)
+                probs = outcome_probabilities(matrices)
 
-            # Bookmaker: true probabilities with log-odds noise and a proportional margin.
-            noisy = np.exp(np.log(probs) + rng.normal(0, bookmaker_noise_sd, probs.shape))
-            book = noisy / noisy.sum(axis=1, keepdims=True)
-            odds = np.round(1.0 / (book * (1.0 + bookmaker_margin)), 2)
+                # Bookmaker: true probabilities with log-odds noise and a proportional margin.
+                noisy = np.exp(np.log(probs) + rng.normal(0, bookmaker_noise_sd, probs.shape))
+                book = noisy / noisy.sum(axis=1, keepdims=True)
+                odds = np.round(1.0 / (book * (1.0 + bookmaker_margin)), 2)
 
-            for k, (home, away) in enumerate(fixtures):
-                flat = matrices[k].ravel()
-                score = rng.choice(flat.size, p=flat / flat.sum())
-                hg, ag = divmod(score, 11)
-                kickoff = day + pd.Timedelta(hours=15 if k % 3 else 17, minutes=30 if k % 3 == 2 else 0)
-                rows.append(
-                    {
-                        "match_id": f"m{match_number:05d}",
-                        "season": season,
-                        "kickoff": kickoff,
-                        "home_team": home,
-                        "away_team": away,
-                        "home_goals": int(hg),
-                        "away_goals": int(ag),
-                        "home_xg": round(float(lam[k] * np.exp(rng.normal(-xg_noise_sd**2 / 2, xg_noise_sd))), 2),
-                        "away_xg": round(float(mu[k] * np.exp(rng.normal(-xg_noise_sd**2 / 2, xg_noise_sd))), 2),
-                        "odds_home": odds[k, 0],
-                        "odds_draw": odds[k, 1],
-                        "odds_away": odds[k, 2],
-                    }
-                )
-                match_number += 1
+                for k, (home, away) in enumerate(fixtures):
+                    flat = matrices[k].ravel()
+                    score = rng.choice(flat.size, p=flat / flat.sum())
+                    hg, ag = divmod(score, 11)
+                    kickoff = day + pd.Timedelta(hours=15 if k % 3 else 17, minutes=30 if k % 3 == 2 else 0)
+                    xg_h = float(lam[k] * np.exp(rng.normal(-xg_noise_sd**2 / 2, xg_noise_sd)))
+                    xg_a = float(mu[k] * np.exp(rng.normal(-xg_noise_sd**2 / 2, xg_noise_sd)))
+                    has_xg = division == "E0"
+                    rows.append(
+                        {
+                            "match_id": f"m{match_number:05d}",
+                            "division": division,
+                            "season": season,
+                            "kickoff": kickoff,
+                            "home_team": home,
+                            "away_team": away,
+                            "home_goals": int(hg),
+                            "away_goals": int(ag),
+                            "home_xg": round(xg_h, 2) if has_xg else np.nan,
+                            "away_xg": round(xg_a, 2) if has_xg else np.nan,
+                            "odds_home": odds[k, 0],
+                            "odds_draw": odds[k, 1],
+                            "odds_away": odds[k, 2],
+                        }
+                    )
+                    match_number += 1
+                    result = 3 if hg > ag else 1 if hg == ag else 0
+                    points[home][0] += result
+                    points[away][0] += 3 if ag > hg else 1 if hg == ag else 0
+                    points[home][1] += hg - ag
+                    points[away][1] += ag - hg
 
-    frame = pd.DataFrame(rows).sort_values("kickoff").reset_index(drop=True)
+        if second_division_teams:
+            table = {div: sorted(clubs, key=lambda t: points[t], reverse=True) for div, clubs in members.items()}
+            down, up = table["E0"][-promoted:], table["E1"][:promoted]
+            members = {
+                "E0": [t for t in members["E0"] if t not in down] + up,
+                "E1": [t for t in members["E1"] if t not in up] + down,
+            }
+
+    frame = pd.DataFrame(rows).sort_values("kickoff", kind="stable").reset_index(drop=True)
     frame[["home_goals", "away_goals"]] = frame[["home_goals", "away_goals"]].astype("Int64")
     if not return_truth:
         return frame

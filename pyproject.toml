@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "football-predictor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Dixon-Coles bivariate Poisson model for Premier League match outcomes, with ETL, point-in-time features and EV backtesting."
 readme = "README.md"
 requires-python = ">=3.10"

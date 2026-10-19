@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS team_aliases (
 CREATE TABLE IF NOT EXISTS matches (
     match_id      TEXT PRIMARY KEY,
     season        INTEGER NOT NULL,
+    division      TEXT NOT NULL DEFAULT 'E0',
     kickoff       TEXT NOT NULL,
     home_team_id  TEXT NOT NULL REFERENCES teams(team_id),
     away_team_id  TEXT NOT NULL REFERENCES teams(team_id),
@@ -111,10 +112,16 @@ CREATE TABLE IF NOT EXISTS lineups (
     minutes      INTEGER,
     PRIMARY KEY (match_id, team_id, player_name)
 );
+"""
+
+# Views are rebuilt on every connection so schema changes reach old databases.
+VIEWS = """
+DROP VIEW IF EXISTS v_match_dataset;
+DROP VIEW IF EXISTS v_best_odds;
 
 -- Reference price per fixture: closing before opening, sharp before soft. The
 -- best-of-market "max" price is excluded: no single bettor could get it.
-CREATE VIEW IF NOT EXISTS v_best_odds AS
+CREATE VIEW v_best_odds AS
 SELECT match_id, bookmaker, market_time, home, draw, away
 FROM (
     SELECT o.*,
@@ -129,8 +136,8 @@ FROM (
 )
 WHERE rnk = 1;
 
-CREATE VIEW IF NOT EXISTS v_match_dataset AS
-SELECT m.match_id, m.season, m.kickoff,
+CREATE VIEW v_match_dataset AS
+SELECT m.match_id, m.season, m.division, m.kickoff,
        m.home_team_id, ht.canonical_name AS home_team,
        m.away_team_id, at.canonical_name AS away_team,
        m.home_goals, m.away_goals,
@@ -184,6 +191,15 @@ class Database:
         self._conn = sqlite3.connect(str(path))
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(SCHEMA)
+        self._migrate()
+        self._conn.executescript(VIEWS)
+
+    def _migrate(self) -> None:
+        """Bring databases created by earlier versions up to the current schema."""
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(matches)")}
+        if "division" not in columns:
+            with self._conn:
+                self._conn.execute("ALTER TABLE matches ADD COLUMN division TEXT NOT NULL DEFAULT 'E0'")
 
     def close(self) -> None:
         self._conn.close()
@@ -216,7 +232,8 @@ class Database:
     # -- facts --------------------------------------------------------------
 
     def upsert_matches(self, frame: pd.DataFrame, source: str) -> None:
-        """Rows need season, kickoff, home_team_id, away_team_id, home_goals, away_goals.
+        """Rows need season, kickoff, home_team_id, away_team_id, home_goals, away_goals
+        (and optionally division, understat_id).
 
         Goals are filled from whichever source has them; the kickoff time is
         taken from the most authoritative source seen so far.
@@ -226,6 +243,7 @@ class Database:
             (
                 match_uuid(int(r.season), r.home_team_id, r.away_team_id),
                 int(r.season),
+                str(getattr(r, "division", "E0")),
                 _iso(r.kickoff),
                 r.home_team_id,
                 r.away_team_id,
@@ -239,14 +257,16 @@ class Database:
         ]
         with self.transaction() as conn:
             conn.executemany(
-                """INSERT INTO matches (match_id, season, kickoff, home_team_id, away_team_id,
+                """INSERT INTO matches (match_id, season, division, kickoff, home_team_id, away_team_id,
                                         home_goals, away_goals, source, source_rank, understat_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT (match_id) DO UPDATE SET
                        home_goals = COALESCE(excluded.home_goals, matches.home_goals),
                        away_goals = COALESCE(excluded.away_goals, matches.away_goals),
                        kickoff = CASE WHEN excluded.source_rank <= matches.source_rank
                                       THEN excluded.kickoff ELSE matches.kickoff END,
+                       division = CASE WHEN excluded.source_rank <= matches.source_rank
+                                       THEN excluded.division ELSE matches.division END,
                        source = CASE WHEN excluded.source_rank <= matches.source_rank
                                      THEN excluded.source ELSE matches.source END,
                        source_rank = MIN(excluded.source_rank, matches.source_rank),
@@ -289,6 +309,10 @@ class Database:
         self._upsert("lineups", ["match_id", "team_id", "player_name"], frame)
 
     # -- reads --------------------------------------------------------------
+
+    def rating_snapshots(self) -> set[pd.Timestamp]:
+        dates = self.query("SELECT DISTINCT snapshot_date FROM player_ratings")["snapshot_date"]
+        return set(pd.to_datetime(dates))
 
     def existing_match_ids(self) -> set[str]:
         return set(self.query("SELECT match_id FROM matches")["match_id"])

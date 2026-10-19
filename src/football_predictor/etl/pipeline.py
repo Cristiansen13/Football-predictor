@@ -9,6 +9,7 @@ from typing import Callable, Iterable
 
 import pandas as pd
 
+from ..config import season_from_date
 from ..db import Database, match_uuid
 from . import fbref, football_data, sofifa, understat
 from .entity_resolution import FuzzyMatcher, UnresolvedEntityError, team_resolver
@@ -17,6 +18,8 @@ from .http import HttpClient
 log = logging.getLogger(__name__)
 
 SOURCES = ("football_data", "understat", "fbref", "sofifa")
+DIVISIONS = ("E0", "E1")
+UNDERSTAT_FIRST_SEASON = 2014  # Understat's Premier League coverage starts in 2014/15
 
 
 class Pipeline:
@@ -27,24 +30,33 @@ class Pipeline:
         resolver: FuzzyMatcher | None = None,
         *,
         current_season: int | None = None,
+        divisions: Iterable[str] = DIVISIONS,
     ) -> None:
         self.db = db
         self.client = client
         self.resolver = resolver or team_resolver()
         # Pages for an unfinished season change every week, so never cache them.
         self.current_season = current_season
+        self.divisions = tuple(divisions)
 
     def _cache(self, season: int) -> dict[str, bool]:
         return {"use_cache": season != self.current_season}
 
-    def team_id(self, name: str, source: str) -> str:
-        resolution = self.resolver.resolve(name)
+    def team_id(self, name: str, source: str, *, create_missing: bool = False) -> str:
+        resolution = self.resolver.resolve(name, create_missing=create_missing)
+        if resolution.method == "created":
+            log.info("%s: registered new club %r", source, name)
         return self.db.register_team(resolution, source)
 
-    def _with_team_ids(self, frame: pd.DataFrame, source: str, columns=("home_team", "away_team")) -> pd.DataFrame:
+    def _with_team_ids(
+        self, frame: pd.DataFrame, source: str, columns=("home_team", "away_team"), create_missing: bool = False
+    ) -> pd.DataFrame:
         frame = frame.copy()
         for column in columns:
-            ids = {name: self.team_id(name, source) for name in frame[column].dropna().unique()}
+            ids = {
+                name: self.team_id(name, source, create_missing=create_missing)
+                for name in frame[column].dropna().unique()
+            }
             frame[f"{column}_id"] = frame[column].map(ids)
         return frame
 
@@ -58,10 +70,22 @@ class Pipeline:
 
     # -- sources ------------------------------------------------------------
 
-    def load_football_data(self, season: int) -> None:
-        csv_text = football_data.fetch_season_csv(self.client, season, **self._cache(season))
-        matches, odds = football_data.parse_season(csv_text, season)
-        matches = self._with_match_ids(self._with_team_ids(matches, "football_data"))
+    def _load_odds(self, odds: pd.DataFrame, create_missing: bool) -> None:
+        if odds.empty:
+            return
+        odds = self._with_match_ids(self._with_team_ids(odds, "football_data", create_missing=create_missing))
+        known = self.db.existing_match_ids()
+        self.db.upsert_odds(
+            odds.loc[odds["match_id"].isin(known), ["match_id", "bookmaker", "market_time", "home", "draw", "away"]]
+        )
+
+    def load_football_data(self, season: int, division: str = "E0") -> None:
+        csv_text = football_data.fetch_season_csv(self.client, season, division, **self._cache(season))
+        matches, odds = football_data.parse_season(csv_text, season, division)
+        # Lower-division names are less curated: a club no known name resembles
+        # becomes a new entity instead of failing the load.
+        create = division != "E0"
+        matches = self._with_match_ids(self._with_team_ids(matches, "football_data", create_missing=create))
         self.db.upsert_matches(matches, "football_data")
 
         stats = pd.concat(
@@ -78,13 +102,26 @@ class Pipeline:
             ]
         )
         self.db.upsert_match_stats(stats)
+        self._load_odds(odds, create)
+        log.info("football-data %s %s: %d matches, %d odds rows", division, season, len(matches), len(odds))
 
-        if not odds.empty:
-            odds = self._with_match_ids(self._with_team_ids(odds, "football_data"))
-            self.db.upsert_odds(odds[["match_id", "bookmaker", "market_time", "home", "draw", "away"]])
-        log.info("football-data %s: %d matches, %d odds rows", season, len(matches), len(odds))
+    def load_upcoming_fixtures(self) -> None:
+        """This week's fixtures with current prices (Football-Data ``fixtures.csv``)."""
+        matches, odds = football_data.parse_fixtures(
+            football_data.fetch_fixtures_csv(self.client), self.divisions
+        )
+        if matches.empty:
+            log.info("football-data fixtures: none listed")
+            return
+        matches = self._with_match_ids(self._with_team_ids(matches, "football_data", create_missing=True))
+        self.db.upsert_matches(matches, "football_data")
+        self._load_odds(odds, True)
+        log.info("football-data fixtures: %d upcoming matches", len(matches))
 
     def load_understat(self, season: int, *, lineups: bool = False) -> None:
+        if season < UNDERSTAT_FIRST_SEASON:
+            log.info("understat %s: skipped, coverage starts in %s", season, UNDERSTAT_FIRST_SEASON)
+            return
         matches, history = understat.fetch_league(self.client, season, **self._cache(season))
         matches = self._with_match_ids(self._with_team_ids(matches, "understat"))
         self.db.upsert_matches(matches, "understat")
@@ -104,10 +141,12 @@ class Pipeline:
     def load_understat_lineups(self, matches: pd.DataFrame) -> None:
         """Starting XIs (and team xA) from Understat match pages; one request per match."""
         done = set(self.db.query("SELECT DISTINCT match_id FROM lineups")["match_id"])
-        for match in matches.itertuples(index=False):
-            if match.match_id in done:
-                continue
+        todo = matches[~matches["match_id"].isin(done)]
+        log.info("understat lineups: %d to fetch, %d already loaded", len(todo), len(matches) - len(todo))
+        for count, match in enumerate(todo.itertuples(index=False), start=1):
             rosters = understat.fetch_match_rosters(self.client, match.understat_id)
+            if count % 50 == 0:
+                log.info("understat lineups: %d/%d", count, len(todo))
             if rosters.empty:
                 continue
             team_ids = {"home": match.home_team_id, "away": match.away_team_id}
@@ -129,10 +168,12 @@ class Pipeline:
         if not team_logs:
             return
 
-        for squad in fbref.squads_from_schedule(schedule).itertuples(index=False):
+        squads = fbref.squads_from_schedule(schedule)
+        for count, squad in enumerate(squads.itertuples(index=False), start=1):
             schedule_log, shooting_log = fbref.fetch_team_logs(
                 self.client, squad.squad_id, squad.slug, squad.team, season, **self._cache(season)
             )
+            log.info("fbref %s: team logs %d/%d (%s)", season, count, len(squads), squad.team)
             team_id = self.team_id(squad.team, "fbref")
             self.db.upsert_team_schedule(
                 schedule_log.assign(team_id=team_id)[["team_id", "kickoff", "competition", "venue"]]
@@ -163,9 +204,14 @@ class Pipeline:
                 self.db.upsert_match_stats(stats[stats["match_id"].isin(known)])
 
     def load_sofifa(self, start: datetime, end: datetime, *, every_days: int = 28, **browser_kwargs) -> None:
+        """Rating snapshots roughly every ``every_days``; snapshots already loaded are skipped."""
+        loaded = self.db.rating_snapshots()
+        editions = sofifa.editions_for_seasons(season_from_date(start), season_from_date(end))
         with sofifa.SofifaBrowser(**browser_kwargs) as browser:
-            versions = sofifa.select_snapshots(browser.roster_versions(), start, end, every_days)
-            for version in versions.itertuples(index=False):
+            versions = sofifa.select_snapshots(browser.roster_versions(editions), start, end, every_days)
+            todo = versions[~versions["snapshot_date"].isin(loaded)]
+            log.info("sofifa: %d snapshots selected, %d already loaded", len(versions), len(versions) - len(todo))
+            for version in todo.itertuples(index=False):
                 ratings = browser.league_ratings(version.roster_id)
                 ratings = ratings.dropna(subset=["overall"])
                 team_ids = {}
@@ -186,7 +232,8 @@ class Pipeline:
                         }
                     )
                 )
-                log.info("sofifa roster %s: %d players", version.roster_id, len(ratings))
+                log.info("sofifa roster %s (%s): %d players", version.roster_id,
+                         f"{version.snapshot_date:%Y-%m-%d}", len(ratings))
 
     def run(
         self,
@@ -194,12 +241,16 @@ class Pipeline:
         sources: Iterable[str] = ("football_data", "understat"),
         *,
         lineups: bool = False,
+        upcoming: bool = True,
         browser_kwargs: dict | None = None,
+        sofifa_every_days: int = 28,
     ) -> list[tuple[str, int | None, str]]:
         """Load every (source, season); returns the failures as (source, season, error).
 
         A failing source (blocked by the site, page layout changed) is logged
-        and skipped so the remaining sources still load.
+        and skipped so the remaining sources still load. With ``upcoming`` and
+        the current season requested, this week's fixtures and prices are
+        loaded too.
         """
         seasons, sources = list(seasons), set(sources)
         unknown = sources - set(SOURCES)
@@ -209,14 +260,19 @@ class Pipeline:
         for season in seasons:
             # Football-Data first: it is the most authoritative source of kickoffs.
             if "football_data" in sources:
-                steps.append(("football_data", season, partial(self.load_football_data, season)))
+                for division in self.divisions:
+                    steps.append((f"football_data:{division}", season,
+                                  partial(self.load_football_data, season, division)))
             if "fbref" in sources:
                 steps.append(("fbref", season, partial(self.load_fbref, season)))
             if "understat" in sources:
                 steps.append(("understat", season, partial(self.load_understat, season, lineups=lineups)))
+        if "football_data" in sources and upcoming and self.current_season in seasons:
+            steps.append(("football_data:fixtures", None, self.load_upcoming_fixtures))
         if "sofifa" in sources:
             window = (datetime(min(seasons), 7, 1), datetime(max(seasons) + 1, 6, 30))
-            steps.append(("sofifa", None, partial(self.load_sofifa, *window, **(browser_kwargs or {}))))
+            steps.append(("sofifa", None, partial(self.load_sofifa, *window, every_days=sofifa_every_days,
+                                                  **(browser_kwargs or {}))))
 
         failures = []
         for source, season, step in steps:
@@ -226,3 +282,58 @@ class Pipeline:
                 log.exception("%s %s failed", source, season or "")
                 failures.append((source, season, f"{type(exc).__name__}: {exc}"))
         return failures
+
+
+def probe_sources(
+    client: HttpClient,
+    season: int,
+    sources: Iterable[str] = SOURCES,
+    *,
+    browser_kwargs: dict | None = None,
+) -> pd.DataFrame:
+    """Fetch and parse one live page per source; reports what works before a long ingest."""
+    sources = set(sources)
+    results = []
+
+    def attempt(source: str, check: Callable[[], tuple[int, str]]) -> None:
+        try:
+            rows, detail = check()
+            results.append({"source": source, "ok": rows > 0, "rows": rows, "detail": detail})
+        except Exception as exc:  # noqa: BLE001 - report, do not raise
+            results.append({"source": source, "ok": False, "rows": 0, "detail": f"{type(exc).__name__}: {exc}"[:300]})
+
+    if "football_data" in sources:
+        for division in DIVISIONS:
+            def check_fd(division=division):
+                matches, odds = football_data.parse_season(
+                    football_data.fetch_season_csv(client, season, division, use_cache=False), season, division
+                )
+                closing = (odds["market_time"] == "closing").sum() if not odds.empty else 0
+                return len(matches), f"{closing} closing-odds rows"
+            attempt(f"football_data:{division}", check_fd)
+
+    if "understat" in sources:
+        def check_understat():
+            matches, history = understat.fetch_league(client, season, use_cache=False)
+            return len(matches), f"{matches['home_xg'].notna().sum()} matches with xG, {len(history)} team rows"
+        attempt("understat", check_understat)
+
+    if "fbref" in sources:
+        def check_fbref():
+            schedule = fbref.fetch_schedule(client, season, use_cache=False)
+            squad = fbref.squads_from_schedule(schedule).iloc[0]
+            log_frame, shots = fbref.fetch_team_logs(client, squad.squad_id, squad.slug, squad.team, season,
+                                                     use_cache=False)
+            return len(schedule), (f"{squad.team}: {log_frame['possession'].notna().sum()} rows with possession, "
+                                   f"{shots['shots'].notna().sum()} with shots")
+        attempt("fbref", check_fbref)
+
+    if "sofifa" in sources:
+        def check_sofifa():
+            with sofifa.SofifaBrowser(**(browser_kwargs or {})) as browser:
+                versions = browser.roster_versions(sofifa.editions_for_seasons(season, season))
+                ratings = browser.league_ratings(versions["roster_id"].iloc[-1], max_pages=1)
+            return len(ratings), f"{len(versions)} roster versions; latest {versions['snapshot_date'].max():%Y-%m-%d}"
+        attempt("sofifa", check_sofifa)
+
+    return pd.DataFrame(results, columns=["source", "ok", "rows", "detail"])

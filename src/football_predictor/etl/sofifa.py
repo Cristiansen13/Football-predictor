@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 from datetime import datetime
-from types import TracebackType
+from typing import Iterable
 
 import pandas as pd
 from bs4 import BeautifulSoup
+
+from .browser import BrowserFetcher
 
 log = logging.getLogger(__name__)
 
@@ -88,51 +89,33 @@ def parse_players_page(html: str) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["sofifa_id", "player_name", "team", "overall", "positions"])
 
 
-class SofifaBrowser:
-    """Headless Chromium session that renders SOFIFA pages."""
+class SofifaBrowser(BrowserFetcher):
+    """Browser session that renders SOFIFA pages (behind a JavaScript challenge)."""
 
-    def __init__(self, *, delay: float = 3.0, executable_path: str | None = None, headless: bool = True):
-        self.delay = delay
-        self.executable_path = executable_path
-        self.headless = headless
-        self._last = float("-inf")
+    def get_html(self, url: str, wait_for: str | None = "table tbody tr") -> str:
+        return super().get_html(url, wait_for=wait_for)
 
-    def __enter__(self) -> "SofifaBrowser":
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError as exc:  # pragma: no cover - optional dependency
-            raise RuntimeError("Install the 'scraping' extra: pip install football-predictor[scraping]") from exc
-        self._playwright = sync_playwright().start()
-        try:
-            self._browser = self._playwright.chromium.launch(
-                headless=self.headless, executable_path=self.executable_path
+    def roster_versions(self, editions: Iterable[int] = ()) -> pd.DataFrame:
+        """Roster update ids and dates, from the home page and each game edition.
+
+        Roster ids are ``EEUUUU``: game edition (``24`` = EA FC 24, covering the
+        2023/24 season) and update number, so ``EE0001`` opens an edition and
+        its version selector lists that edition's updates.
+        """
+        urls = [BASE_URL + "/"] + [f"{BASE_URL}/?r={edition:02d}0001&set=true" for edition in editions]
+        frames = []
+        for url in urls:
+            try:
+                frames.append(parse_roster_versions(self.get_html(url, wait_for="body")))
+            except Exception as exc:  # noqa: BLE001 - one edition failing should not stop the rest
+                log.warning("sofifa: could not read versions from %s: %s", url, exc)
+        versions = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        if versions.empty:
+            raise RuntimeError(
+                "Could not read any SOFIFA roster versions; the version selector markup may have "
+                "changed (see parse_roster_versions) or the site blocked the browser"
             )
-            self._page = self._browser.new_page()
-        except BaseException:
-            self._playwright.stop()
-            raise
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        self._browser.close()
-        self._playwright.stop()
-
-    def get_html(self, url: str, wait_for: str = "table tbody tr") -> str:
-        wait = self.delay - (time.monotonic() - self._last)
-        if wait > 0:
-            time.sleep(wait)
-        self._last = time.monotonic()
-        self._page.goto(url, wait_until="domcontentloaded")
-        self._page.wait_for_selector(wait_for, timeout=30_000)
-        return self._page.content()
-
-    def roster_versions(self) -> pd.DataFrame:
-        return parse_roster_versions(self.get_html(BASE_URL + "/", wait_for="body"))
+        return versions.drop_duplicates("roster_id").sort_values("snapshot_date").reset_index(drop=True)
 
     def league_ratings(self, roster_id: str, max_pages: int = 20) -> pd.DataFrame:
         """All Premier League player ratings in one roster snapshot."""
@@ -145,7 +128,14 @@ class SofifaBrowser:
             if len(frame) < PAGE_SIZE:
                 break
         ratings = pd.concat(pages, ignore_index=True).drop_duplicates("sofifa_id")
+        if ratings.empty:
+            raise RuntimeError(f"No players parsed for roster {roster_id}; the players table markup may have changed")
         return ratings.assign(roster_id=roster_id)
+
+
+def editions_for_seasons(first_season: int, last_season: int) -> list[int]:
+    """Game editions whose ratings cover the given seasons (2023/24 -> 24)."""
+    return [(season + 1) % 100 for season in range(first_season, last_season + 1)]
 
 
 def select_snapshots(versions: pd.DataFrame, start: datetime, end: datetime, every_days: int = 28) -> pd.DataFrame:

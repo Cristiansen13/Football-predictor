@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
 HOME, DRAW, AWAY = 0, 1, 2
 
@@ -44,3 +45,71 @@ def implied_probabilities(odds: np.ndarray) -> np.ndarray:
 
 def overround(odds: np.ndarray) -> np.ndarray:
     return (1.0 / np.asarray(odds, dtype=float)).sum(axis=1) - 1.0
+
+
+def accuracy(probabilities: np.ndarray, outcomes: np.ndarray) -> float:
+    """Share of matches whose most likely outcome happened (secondary, coarse metric)."""
+    return float(np.mean(np.argmax(np.asarray(probabilities), axis=1) == np.asarray(outcomes, dtype=int)))
+
+
+def brier_per_match(probabilities: np.ndarray, outcomes: np.ndarray) -> np.ndarray:
+    return np.sum((np.asarray(probabilities, dtype=float) - _one_hot(outcomes)) ** 2, axis=1)
+
+
+def skill_score(score: float, reference: float) -> float:
+    """1 - score / reference: > 0 means better than the reference forecast."""
+    return float(1.0 - score / reference) if reference else float("nan")
+
+
+def calibration_table(probabilities: np.ndarray, outcomes: np.ndarray, bins: int = 10) -> pd.DataFrame:
+    """Reliability table: per outcome and probability bin, mean forecast vs observed frequency."""
+    probabilities = np.asarray(probabilities, dtype=float)
+    observed = _one_hot(outcomes)
+    edges = np.linspace(0.0, 1.0, bins + 1)
+    rows = []
+    for k, name in enumerate(("home", "draw", "away")):
+        which = np.clip(np.digitize(probabilities[:, k], edges[1:-1]), 0, bins - 1)
+        for b in range(bins):
+            mask = which == b
+            if mask.any():
+                rows.append(
+                    {
+                        "outcome": name,
+                        "bin_low": edges[b],
+                        "bin_high": edges[b + 1],
+                        "count": int(mask.sum()),
+                        "mean_forecast": float(probabilities[mask, k].mean()),
+                        "observed": float(observed[mask, k].mean()),
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def expected_calibration_error(probabilities: np.ndarray, outcomes: np.ndarray, bins: int = 10) -> float:
+    """Count-weighted mean |forecast - observed| over all outcome bins (0 = perfectly calibrated)."""
+    table = calibration_table(probabilities, outcomes, bins)
+    if table.empty:
+        return float("nan")
+    gap = (table["mean_forecast"] - table["observed"]).abs()
+    return float(np.average(gap, weights=table["count"]))
+
+
+def bootstrap_interval(
+    statistic,
+    *arrays: np.ndarray,
+    n_resamples: int = 2000,
+    level: float = 0.95,
+    seed: int = 0,
+) -> tuple[float, float, np.ndarray]:
+    """Percentile bootstrap over matched rows of ``arrays``.
+
+    Returns (low, high, resampled statistics).
+    """
+    rng = np.random.default_rng(seed)
+    n = len(arrays[0])
+    stats = np.empty(n_resamples)
+    for i in range(n_resamples):
+        idx = rng.integers(0, n, n)
+        stats[i] = statistic(*(np.asarray(a)[idx] for a in arrays))
+    tail = (1.0 - level) / 2
+    return float(np.quantile(stats, tail)), float(np.quantile(stats, 1 - tail)), stats

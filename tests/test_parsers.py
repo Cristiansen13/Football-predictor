@@ -106,3 +106,18 @@ def test_sofifa_snapshot_selection():
     chosen = sofifa.select_snapshots(versions, pd.Timestamp("2023-07-01"), pd.Timestamp("2023-09-01"), every_days=20)
     assert chosen["snapshot_date"].iloc[0] < pd.Timestamp("2023-07-01")
     assert chosen["snapshot_date"].diff().dropna().min() >= pd.Timedelta(days=10)
+
+
+def test_football_data_fixtures_and_bom():
+    matches, odds = football_data.parse_fixtures(fake.fixtures_csv())
+    assert list(matches["home_team"]) == ["Wolves", "Nott'm Forest"]  # Scottish row filtered out
+    assert matches["home_goals"].isna().all() and (matches["season"] == 2023).all()
+    assert set(odds["market_time"]) == {"opening"} and set(odds["bookmaker"]) == {"pinnacle", "average", "bet365"}
+
+    championship, odds = football_data.parse_season(fake.championship_csv(), 2023, "E1")
+    assert len(championship) == 12 and (championship["division"] == "E1").all()  # BOM-prefixed header parsed
+    assert set(odds["bookmaker"]) == {"average"}
+
+
+def test_sofifa_editions_cover_seasons():
+    assert sofifa.editions_for_seasons(2023, 2024) == [24, 25]

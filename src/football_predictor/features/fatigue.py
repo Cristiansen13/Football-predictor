@@ -26,6 +26,7 @@ def schedule_fatigue(
     threshold_hours: float = 72.0,
     away_multiplier: float = 1.5,
     max_rest_days: float = 14.0,
+    same_fixture_hours: float = 20.0,
 ) -> pd.DataFrame:
     """Rest days, fatigue index (1 / rest days) and fatigue penalty at each kickoff.
 
@@ -34,6 +35,12 @@ def schedule_fatigue(
     trip matters for Sunday's league game. League fixtures in ``long`` are
     always included. Rest is capped at ``max_rest_days`` so the first match
     after the summer break does not dominate.
+
+    Sources disagree on kickoff times (Football-Data had no times before
+    2019, rescheduled games keep their old slot elsewhere), so the same match
+    can appear twice a few hours apart. A fixture less than
+    ``same_fixture_hours`` before kickoff is treated as that same match rather
+    than as the previous one; no club plays twice within 20 hours.
     """
     league = long[["team", "kickoff", "is_home"]].assign(
         venue=np.where(long["is_home"], "home", "away")
@@ -54,15 +61,14 @@ def schedule_fatigue(
         kickoff=lambda f: pd.to_datetime(f["kickoff"]).astype("datetime64[ns]"),
         _row=np.arange(len(long)),
     )
-    rows["_key"] = rows["kickoff"]
+    rows["_key"] = rows["kickoff"] - pd.Timedelta(hours=same_fixture_hours)
     merged = (
         pd.merge_asof(
             rows.sort_values("_key"),
             calendar,
             on="_key",
             by="team",
-            allow_exact_matches=False,  # the previous fixture, never the current one
-            direction="backward",
+            direction="backward",  # the previous fixture, never the current one
         )
         .sort_values("_row")
         .reset_index(drop=True)
