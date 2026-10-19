@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "football-predictor"
+version = "0.1.0"
+description = "Dixon-Coles bivariate Poisson model for Premier League match outcomes, with ETL, point-in-time features and EV backtesting."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+    "lxml>=4.9",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+scraping = ["playwright>=1.40"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+football-predictor = "football_predictor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
