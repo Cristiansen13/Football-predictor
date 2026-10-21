@@ -65,7 +65,8 @@ def coverage_report(db: Database) -> pd.DataFrame:
                 "closing_odds": float((played["odds_market_time"] == "closing").sum() / n),
                 "any_odds": share("odds_home"),
                 "lineups": float(played["match_id"].isin(lineup_matches).sum() / n),
-                "schedule_rows": int((schedule_seasons == season).sum()),
+                "schedule_rows": int(((schedule_seasons == season) & schedule["team"].isin(teams)).sum())
+                if not schedule.empty else 0,
                 "rating_snapshots": int((snapshots["season"] == season).sum()),
             }
         )
