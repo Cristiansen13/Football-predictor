@@ -292,6 +292,22 @@ opening and closing prices:
   bet at closing time, bookmakers restrict accounts that do this, and the
   discrepancies are shrinking season by season. It is an edge in the market's
   own numbers, not in the model's.
+* **Line-up news moves the line, but not enough to bet on.** The one feature
+  that helped the forecast was the starting XI, so the natural question is
+  whether its news is worth money in the hour between team sheets and
+  kickoff. For 1,520 matches (2022/23–2025/26) the model predicted each
+  match twice, with the XI that started and with the club's regular XI; the
+  difference is the line-up surprise as the model reads it. It does point
+  the way the market moves (correlation with the opening-to-closing move
+  0.09 on 1X2, 0.22 on over/under, 0.18 in the top quintile of surprises;
+  a side starting at under 85% of its regular XI is marked down about 1.8
+  points by closing). But the market moves only a tenth to a sixth as far as
+  the model's adjustment; adding the surprise to the opening line makes the
+  forecast worse, and even scaled to a fifth it improves the opening line by
+  0.0001 Brier; and bets in the surprise direction carry negative
+  closing-line value (−2% to −4%) even at the opening price, which is days
+  before anyone could act on a team sheet. The information is real and
+  already priced. No timed line-up strategy was built.
 * **De-margining matters for this.** With proportional de-margining the same
   strategy looked like +5.5% CLV and returned 0%: proportional scaling gives
   longshots too much probability, so they looked like value. The power (or
