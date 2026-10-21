@@ -105,9 +105,10 @@ def validate(report: pd.DataFrame, current_season: int | None = None) -> list[Is
     e0 = report[report["division"] == "E0"]
     if not e0.empty and (e0["lineups"] == 0).all():
         issues.append(Issue("warning", "E0", None, "no lineups loaded: lineup_fraction feature is unavailable"))
-    if not e0.empty and (e0["rating_snapshots"] == 0).all():
-        issues.append(Issue("warning", "E0", None, "no SOFIFA ratings loaded: lineup features are unavailable"))
+    if not e0.empty and (e0["rating_snapshots"] == 0).all() and (e0["lineups"] > 0).any():
+        issues.append(Issue("warning", "E0", None,
+                            "no SOFIFA ratings loaded: lineup strength uses each starter's Understat xG+xA form"))
     if not e0.empty and (e0["schedule_rows"] == 0).all():
         issues.append(Issue("warning", "E0", None,
-                            "no FBref schedules: fatigue ignores cup and European fixtures"))
+                            "no all-competition schedules (ESPN/FBref): fatigue ignores cup and European fixtures"))
     return issues

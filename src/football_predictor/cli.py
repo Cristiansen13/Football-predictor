@@ -37,7 +37,7 @@ from .evaluation import (
     save_report,
     tune_hyperparameters,
 )
-from .features import audit_point_in_time, build_features, lineup_strength
+from .features import audit_point_in_time, build_features, lineup_strength, player_form_strength
 from .models import FEATURE_PRESETS, DixonColesModel
 from .quality import coverage_report, validate
 from .synthetic import simulate_league
@@ -82,13 +82,21 @@ def load_inputs(args: argparse.Namespace) -> tuple[pd.DataFrame, pd.DataFrame | 
         zip(matches["away_team_id"], matches["away_team"])
     )
     schedule = db.load_team_schedule()
-    lineups = lineup_strength(db.load_lineups(), db.load_player_ratings())
+    lineups = squad_strength(db.load_lineups(), db.load_player_ratings())
     lineups = lineups.assign(team=lineups["team_id"].map(names))
     db.close()
     train = args.train_divisions or [args.division]
     if "all" not in train:
         matches = matches[matches["division"].isin(set(train) | {args.division})]
     return matches, schedule, lineups
+
+
+def squad_strength(lineups: pd.DataFrame, ratings: pd.DataFrame) -> pd.DataFrame:
+    """Starting-XI strength from SOFIFA ratings when loaded, otherwise from the
+    starters' own Understat xG+xA form (ratings are behind an anti-bot wall)."""
+    if not ratings.empty:
+        return lineup_strength(lineups, ratings)
+    return player_form_strength(lineups)
 
 
 def featurize(args: argparse.Namespace, matches, schedule=None, lineups=None) -> pd.DataFrame:
@@ -426,7 +434,8 @@ def build_parser() -> argparse.ArgumentParser:
     ingest = sub.add_parser("ingest", help="run the ETL pipeline into SQLite")
     ingest.add_argument("--seasons", default=f"{FIRST_SEASON}-{current_season()}",
                         help="season start years, e.g. 2016-2024 or 2022,2023 (default: %(default)s)")
-    ingest.add_argument("--sources", nargs="+", default=["football_data", "understat"], choices=source_choices)
+    ingest.add_argument("--sources", nargs="+", default=["football_data", "understat", "espn"],
+                        choices=source_choices)
     ingest.add_argument("--divisions", nargs="+", default=list(DIVISIONS),
                         help="Football-Data divisions (E0 Premier League, E1 Championship)")
     ingest.add_argument("--lineups", action="store_true", help="also scrape starting XIs (one request per match)")

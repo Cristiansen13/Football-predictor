@@ -25,6 +25,7 @@ class Settings:
             "understat.com": 2.0,
             "sofifa.com": 3.0,
             "www.football-data.co.uk": 1.0,
+            "site.api.espn.com": 0.5,
         }
     )
 

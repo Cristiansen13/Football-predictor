@@ -30,9 +30,9 @@ With real data:
 
 ```bash
 make check             # is every source reachable and parseable right now?
-make data              # results + odds (PL and Championship), xG/PPDA
-make data-fbref        # + possession and cup fixtures (FBref; see the caveat on anti-bot challenges)
-make data-full         # + starting XIs and SOFIFA ratings (slow on the first run, resumable; same caveat)
+make data              # results + odds (PL and Championship), xG/PPDA, possession, cup fixtures (ESPN)
+make data-fbref        # possession and cup fixtures from FBref instead (see the caveat on anti-bot challenges)
+make data-full         # + starting XIs with player xG/xA, SOFIFA ratings (slow on the first run, resumable)
 make status            # coverage per season, data issues, leakage audit
 make backtest          # tune ξ and xG weight on the previous season, test on the last one
 make predict           # this week's fixtures: probabilities, EV against current prices
@@ -58,6 +58,7 @@ calibration table, PnL curve and reliability diagram). Use `--data-dir` to move 
 | :--- | :--- | :--- | :--- |
 | Football-Data.co.uk | `etl/football_data.py` | direct CSV, Premier League (`E0`) and Championship (`E1`), plus the weekly `fixtures.csv` | `matches`, `odds` (opening/closing per bookmaker), shot counts |
 | Understat | `etl/understat.py` | regex over `JSON.parse('\x..')` script tags; falls back to its JSON endpoint | `advanced_stats` (xG, npxG, PPDA, deep completions; xA from match rosters), `lineups` |
+| ESPN | `etl/espn.py` | public JSON endpoints of ESPN's own site (no key, not a documented API) | `match_stats` (possession, shots), `team_schedule` (league, cups, Europe) |
 | FBref | `etl/fbref.py` | BeautifulSoup over `data-stat` cells, including tables hidden in HTML comments | `matches`, `match_stats` (possession, shots), `team_schedule` (all competitions) |
 | SOFIFA | `etl/sofifa.py` | Playwright (headless Chromium), every game edition's roster updates | `player_ratings`, one row per player per snapshot |
 
@@ -102,7 +103,11 @@ A test shows the audit catches a deliberately leaky feature.
   hours apart counts as one match, not as zero rest.
 * **Lineup strength** (`features/lineup.py`): mean SOFIFA overall rating of the
   starting XI from the last snapshot before match day, and its ratio to the
-  squad's best XI.
+  squad's best XI. Without SOFIFA ratings the same two numbers come from the
+  starters' own form: each player's expected xG + xA per 90 over his earlier
+  matches on Understat (any club, one-year half-life, shrunk towards the
+  league rate over the first 600 minutes), summed over the eleven starters and
+  compared with the club's best eleven of the past year.
 
 ## 3. Dixon-Coles model
 
@@ -204,10 +209,10 @@ transfers, injuries and line-ups.
   Playwright (`make install-browser`), or pass `--chromium-path`.
 * As of October 2026 FBref and SOFIFA answer every automated browser, headless
   or `--headful`, with a Cloudflare Turnstile challenge, so `make data` leaves
-  them out. Football-Data and Understat cover everything the `none` and `form`
-  presets need; without FBref the fatigue index ignores cup fixtures, and
-  without SOFIFA the `full` preset has no lineup strength. `make check` shows
-  when either site becomes reachable again.
+  them out. ESPN's public endpoints supply what FBref did (possession, shots,
+  cup and European fixtures), and the lineup features fall back to Understat
+  player form instead of SOFIFA ratings. `make check` shows when either site
+  becomes reachable again.
 * Lineups cost one request per match and SOFIFA one page load per 60 players
   per snapshot, so expect the first `make data-full` to take hours. Re-runs
   resume where they stopped.

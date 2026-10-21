@@ -179,3 +179,37 @@ def test_ewma_ignores_rows_at_the_same_timestamp():
     out = time_decayed_ewma(long, ["x"], halflife_days=10, prior_weight=0)
     assert out.loc[1, "ewma_x"] == pytest.approx(1.0)
     assert out.loc[2, "ewma_x"] == pytest.approx(1.0)
+
+
+def test_player_form_strength_is_point_in_time_and_rewards_full_strength_sides():
+    from football_predictor.features import player_form_strength
+
+    def xi(match_id, team, kickoff, names, xg, minutes=90):
+        return pd.DataFrame({"match_id": match_id, "team_id": team, "player_name": names, "is_starter": 1,
+                             "minutes": minutes, "xg": xg, "xa": 0.0, "kickoff": pd.Timestamp(kickoff)})
+
+    stars = [f"star{i}" for i in range(11)]
+    reserves = [f"res{i}" for i in range(11)]
+    first = pd.concat([xi("m1", "A", "2023-08-12 15:00", stars, 0.3), xi("m1", "B", "2023-08-12 15:00", reserves, 0.0)])
+    # Second match: A fields the same stars; B fields the same reserves. Third: A rests five stars.
+    second = pd.concat([xi("m2", "A", "2023-08-19 15:00", stars, 0.3), xi("m2", "B", "2023-08-19 15:00", reserves, 0.0)])
+    third = pd.concat([xi("m3", "A", "2023-08-26 15:00", stars[:6] + [f"kid{i}" for i in range(5)], 0.3),
+                       xi("m3", "B", "2023-08-26 15:00", reserves, 0.0)])
+    strength = player_form_strength(pd.concat([first, second, third]), prior_minutes=90)
+    by = strength.set_index(["match_id", "team_id"])
+
+    # Opening day: nobody has history, every starter sits at the league rate.
+    assert by.loc[("m1", "A"), "matched_starters"] == 0
+    assert by.loc[("m1", "A"), "lineup_score"] == pytest.approx(by.loc[("m1", "B"), "lineup_score"])
+    assert by.loc[("m1", "A"), "lineup_fraction"] == pytest.approx(1.0)
+    # After one match the stars are rated above the reserves, from their own earlier xG only.
+    assert by.loc[("m2", "A"), "lineup_score"] > by.loc[("m2", "B"), "lineup_score"]
+    assert by.loc[("m2", "A"), "matched_starters"] == 11
+    # Resting five stars lowers the fraction below 1: the best XI is the full-strength side, whose
+    # value has grown with a second match of history.
+    assert by.loc[("m3", "A"), "lineup_fraction"] < 0.9
+    assert by.loc[("m3", "A"), "best_xi_score"] > by.loc[("m3", "A"), "lineup_score"]
+    assert by.loc[("m3", "A"), "best_xi_score"] >= by.loc[("m2", "A"), "best_xi_score"]
+    # Nothing from match three leaks into match two's values.
+    without_third = player_form_strength(pd.concat([first, second]), prior_minutes=90).set_index(["match_id", "team_id"])
+    assert without_third.loc[("m2", "A"), "lineup_score"] == pytest.approx(by.loc[("m2", "A"), "lineup_score"])

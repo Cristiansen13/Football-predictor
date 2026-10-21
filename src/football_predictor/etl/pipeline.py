@@ -11,13 +11,13 @@ import pandas as pd
 
 from ..config import season_from_date
 from ..db import Database, match_uuid
-from . import fbref, football_data, sofifa, understat
+from . import espn, fbref, football_data, sofifa, understat
 from .entity_resolution import FuzzyMatcher, UnresolvedEntityError, team_resolver
 from .http import HttpClient
 
 log = logging.getLogger(__name__)
 
-SOURCES = ("football_data", "understat", "fbref", "sofifa")
+SOURCES = ("football_data", "understat", "espn", "fbref", "sofifa")
 DIVISIONS = ("E0", "E1")
 UNDERSTAT_FIRST_SEASON = 2014  # Understat's Premier League coverage starts in 2014/15
 
@@ -155,7 +155,7 @@ class Pipeline:
             rosters["team_id"] = rosters["venue"].map(team_ids)
             rosters["match_id"] = match.match_id
             self.db.upsert_lineups(
-                rosters[["match_id", "team_id", "player_name", "position", "is_starter", "minutes"]]
+                rosters[["match_id", "team_id", "player_name", "position", "is_starter", "minutes", "xg", "xa"]]
                 .assign(is_starter=lambda f: f["is_starter"].astype(int))
                 .drop_duplicates(["team_id", "player_name"])
             )
@@ -204,6 +204,51 @@ class Pipeline:
             stats = pd.DataFrame(rows)
             if not stats.empty:
                 self.db.upsert_match_stats(stats[stats["match_id"].isin(known)])
+
+    def load_espn(self, season: int, division: str = "E0") -> None:
+        """Possession and shots per league match, and every club's cup and European fixtures.
+
+        One scoreboard request per match day of the division (dates come from
+        the matches already loaded), then one request per club and cup
+        competition. Needs Football-Data or Understat results for the season.
+        """
+        league = espn.LEAGUES[division]
+        dates = self.db.query(
+            "SELECT DISTINCT date(kickoff) AS day FROM matches WHERE season = ? AND division = ? ORDER BY day",
+            (season, division),
+        )["day"]
+        if dates.empty:
+            raise RuntimeError(f"No {division} matches for {season} in the database; load football_data first")
+        boards = [espn.fetch_scoreboard(self.client, league, pd.Timestamp(day), **self._cache(season))
+                  for day in dates]
+        board = pd.concat(boards, ignore_index=True)
+        board = board[board["is_final"]]
+        if board.empty:
+            raise RuntimeError(f"ESPN {league} scoreboards for {season} listed no finished matches")
+        board = self._with_team_ids(board, "espn", columns=("home_team", "away_team", "team"))
+        board = self._with_match_ids(board.assign(season=season))
+        known = self.db.existing_match_ids()
+        stats = board.loc[board["match_id"].isin(known),
+                          ["match_id", "team_id", "possession", "shots", "shots_on_target"]]
+        stats = stats.dropna(subset=["possession", "shots", "shots_on_target"], how="all")
+        self.db.upsert_match_stats(stats)
+        log.info("espn %s %s: %d match days, %d team rows with statistics", division, season, len(dates), len(stats))
+
+        clubs = board.drop_duplicates("team")[["team", "team_id", "espn_team_id"]]
+        league_rows = board[["team_id", "kickoff", "venue"]].assign(competition=espn.LEAGUE_NAMES[league])
+        schedule = [league_rows]
+        for club in clubs.itertuples(index=False):
+            for cup, competition in espn.CUPS.items():
+                fixtures = espn.fetch_team_schedule(
+                    self.client, cup, club.espn_team_id, club.team, season, competition, **self._cache(season)
+                )
+                if not fixtures.empty:
+                    schedule.append(
+                        fixtures.assign(team_id=club.team_id)[["team_id", "kickoff", "venue", "competition"]]
+                    )
+        rows = pd.concat(schedule, ignore_index=True).drop_duplicates(["team_id", "kickoff"])
+        self.db.upsert_team_schedule(rows[["team_id", "kickoff", "competition", "venue"]])
+        log.info("espn %s %s: %d schedule rows for %d clubs", division, season, len(rows), len(clubs))
 
     def load_sofifa(self, start: datetime, end: datetime, *, every_days: int = 28, **browser_kwargs) -> None:
         """Rating snapshots roughly every ``every_days``; snapshots already loaded are skipped."""
@@ -269,6 +314,9 @@ class Pipeline:
                 steps.append(("fbref", season, partial(self.load_fbref, season)))
             if "understat" in sources:
                 steps.append(("understat", season, partial(self.load_understat, season, lineups=lineups)))
+            if "espn" in sources:
+                # After the result sources: it looks up the season's match days in the database.
+                steps.append(("espn", season, partial(self.load_espn, season)))
         if "football_data" in sources and upcoming and self.current_season in seasons:
             steps.append(("football_data:fixtures", None, self.load_upcoming_fixtures))
         if "sofifa" in sources:
@@ -319,6 +367,22 @@ def probe_sources(
             matches, history = understat.fetch_league(client, season, use_cache=False)
             return len(matches), f"{matches['home_xg'].notna().sum()} matches with xG, {len(history)} team rows"
         attempt("understat", check_understat)
+
+    if "espn" in sources:
+        def check_espn():
+            for day in pd.date_range(f"{season}-08-08", f"{season}-08-31"):
+                board = espn.fetch_scoreboard(client, "eng.1", day, use_cache=False)
+                played = board[board["is_final"]]
+                if not played.empty:
+                    break
+            else:
+                return 0, "no finished Premier League match found in August"
+            club = played.iloc[0]
+            cups = espn.fetch_team_schedule(client, "eng.fa", club.espn_team_id, club.team, season, "FA Cup",
+                                            use_cache=False)
+            return len(played) // 2, (f"{day:%Y-%m-%d}: {played['possession'].notna().sum()} team rows with "
+                                      f"possession; {club.team}: {len(cups)} FA Cup fixtures")
+        attempt("espn", check_espn)
 
     if "fbref" in sources:
         def check_fbref():

@@ -12,7 +12,7 @@ import json
 import pandas as pd
 
 from football_predictor.config import season_label
-from football_predictor.etl import fbref, understat
+from football_predictor.etl import espn, fbref, understat
 
 SEASON = 2023
 
@@ -264,6 +264,52 @@ def sofifa_players_html(players: list[tuple[str, str, str, int]]) -> str:
 # -- HTTP stub -----------------------------------------------------------------
 
 
+# -- ESPN ----------------------------------------------------------------------
+
+ESPN_IDS = {"Manchester United": "360", "Manchester City": "382", "Nottingham Forest": "393",
+            "Wolverhampton Wanderers": "380"}
+
+
+def _espn_event(event_id: str, kickoff: pd.Timestamp, home: str, away: str, home_goals, away_goals,
+                stats: dict[str, dict] | None = None) -> dict:
+    final = home_goals is not None
+    utc = kickoff.tz_localize("Europe/London").tz_convert("UTC")
+    competitors = []
+    for side, team, goals in (("home", home, home_goals), ("away", away, away_goals)):
+        competitor = {"homeAway": side, "team": {"id": ESPN_IDS[team], "displayName": CLUBS[team]["us"]},
+                      "score": "" if goals is None else str(goals)}
+        if stats and team in stats:
+            competitor["statistics"] = [{"name": name, "displayValue": str(value)}
+                                        for name, value in stats[team].items()]
+        competitors.append(competitor)
+    return {"id": event_id, "date": utc.strftime("%Y-%m-%dT%H:%MZ"),
+            "competitions": [{"competitors": competitors,
+                              "status": {"type": {"name": "STATUS_FULL_TIME" if final else "STATUS_SCHEDULED"}}}]}
+
+
+def espn_scoreboard_json(day: pd.Timestamp) -> str:
+    """Premier League scoreboard for one day with possession and shots per side."""
+    events = []
+    for k, row in fixtures().iterrows():
+        if row["kickoff"].normalize() != day.normalize():
+            continue
+        played = pd.notna(row["home_goals"])  # the frame holds NaN for the unplayed round
+        stats = None
+        if played:
+            stats = {row["home"]: {"possessionPct": row["possession"], "totalShots": 10 + k, "shotsOnTarget": 4},
+                     row["away"]: {"possessionPct": 100 - row["possession"], "totalShots": 8 + k, "shotsOnTarget": 3}}
+        goals = (int(row["home_goals"]), int(row["away_goals"])) if played else (None, None)
+        events.append(_espn_event(f"7{k:05d}", row["kickoff"], row["home"], row["away"], *goals, stats))
+    return json.dumps({"events": events})
+
+
+def espn_cup_schedule_json(team: str) -> str:
+    """One FA Cup tie per club, on the Tuesday before the second league round."""
+    opponent = next(t for t in TEAMS if t != team)
+    event = _espn_event("8" + ESPN_IDS[team], pd.Timestamp("2023-08-15 19:45"), team, opponent, 2, 1)
+    return json.dumps({"team": {"id": ESPN_IDS[team]}, "events": [event]})
+
+
 class FakeClient:
     def __init__(self, *, understat_api: bool = False) -> None:
         """``understat_api``: serve the league data only through Understat's JSON
@@ -291,6 +337,16 @@ class FakeClient:
             self.pages[fbref.TEAM_SHOOTING_URL.format(squad_id=squad_id, label=label, slug=slug)] = (
                 fbref_team_log_html(team, "shooting")
             )
+        for day in fixtures()["kickoff"].dt.normalize().unique():
+            self.pages[espn.SCOREBOARD_URL.format(league="eng.1", date=pd.Timestamp(day))] = espn_scoreboard_json(
+                pd.Timestamp(day)
+            )
+        for team, espn_id in ESPN_IDS.items():
+            for cup in espn.CUPS:
+                payload = espn_cup_schedule_json(team) if cup == "eng.fa" else json.dumps(
+                    {"team": {"id": espn_id}, "events": []}
+                )
+                self.pages[espn.TEAM_SCHEDULE_URL.format(league=cup, team_id=espn_id, season=SEASON)] = payload
         self.requested: list[str] = []
 
     def get_text(self, url: str, **kwargs) -> str:

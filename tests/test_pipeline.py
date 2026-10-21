@@ -202,3 +202,48 @@ def test_features_from_warehouse_use_cup_fixtures(loaded_db):
     side = "home" if match["home_team"].iloc[0] == "Manchester City" else "away"
     assert match[f"{side}_rest_days"].iloc[0] == pytest.approx(3 - 2.75 / 24)
     assert match[f"{side}_fatigue_penalty"].iloc[0] > 0
+
+
+def test_espn_fills_possession_and_cup_schedule():
+    """ESPN stands in for FBref: match statistics per league game and cup fixtures per club."""
+    db = Database(":memory:")
+    client = fake.FakeClient()
+    pipeline = Pipeline(db, client)
+    assert pipeline.run([fake.SEASON], ["football_data", "understat", "espn"], upcoming=False) == []
+
+    stats = db.query("SELECT * FROM match_stats WHERE possession IS NOT NULL")
+    assert len(stats) == 20  # ten played matches, two sides each
+    assert set(stats["possession"]) <= set(range(0, 101))
+
+    schedule = db.load_team_schedule()
+    cups = schedule[schedule["competition"] == "FA Cup"]
+    assert len(cups) == 4 and set(cups["team"]) == set(fake.TEAMS)
+    assert (schedule["competition"] == "Premier League").sum() == 20
+    assert all("site.api.espn.com" in url for url in client.requested if "espn" in url)
+
+    dataset = db.load_match_dataset()
+    assert dataset["home_possession"].notna().sum() == 10
+
+
+def test_lineups_store_player_xg_and_xa_and_old_lineup_tables_are_migrated(tmp_path):
+    db = Database(":memory:")
+    pipeline = Pipeline(db, fake.FakeClient())
+    assert pipeline.run([fake.SEASON], ["football_data", "understat"], lineups=True, upcoming=False) == []
+    lineups = db.load_lineups()
+    assert lineups["xg"].notna().all() and lineups["xa"].notna().all()
+    assert (lineups["xg"] == 0.1).sum() > 0
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE lineups (match_id TEXT NOT NULL, team_id TEXT NOT NULL, player_name TEXT NOT NULL,
+            position TEXT, is_starter INTEGER NOT NULL, minutes INTEGER, PRIMARY KEY (match_id, team_id, player_name));
+        INSERT INTO lineups VALUES ('m', 'a', 'Bukayo Saka', 'AMR', 1, 90);
+        """
+    )
+    conn.close()
+    migrated = Database(path)
+    row = migrated.query("SELECT xg, xa, minutes FROM lineups").iloc[0]
+    assert pd.isna(row["xg"]) and pd.isna(row["xa"]) and row["minutes"] == 90
+    migrated.close()

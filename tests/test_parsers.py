@@ -121,3 +121,23 @@ def test_football_data_fixtures_and_bom():
 
 def test_sofifa_editions_cover_seasons():
     assert sofifa.editions_for_seasons(2023, 2024) == [24, 25]
+
+
+def test_espn_scoreboard_and_cup_schedule():
+    from football_predictor.etl import espn
+
+    day = pd.Timestamp("2023-08-12")
+    board = espn.parse_scoreboard(fake.espn_scoreboard_json(day))
+    assert len(board) == 4 and set(board["venue"]) == {"home", "away"}
+    assert board["is_final"].all() and board["possession"].notna().all()
+    first = board.iloc[0]
+    assert first["kickoff"] == pd.Timestamp("2023-08-12 15:00")  # back in UK local time
+    assert first["home_team"] == "Manchester United" and first["espn_team_id"] == "360"
+    assert set(board.columns) >= {"shots", "shots_on_target", "goals"}
+
+    cups = espn.parse_team_schedule(fake.espn_cup_schedule_json("Manchester City"), "Manchester City", "FA Cup")
+    assert len(cups) == 1 and cups.iloc[0]["venue"] == "home" and cups.iloc[0]["competition"] == "FA Cup"
+    assert cups.iloc[0]["kickoff"] == pd.Timestamp("2023-08-15 19:45")
+
+    unplayed = espn.parse_scoreboard(fake.espn_scoreboard_json(pd.Timestamp("2023-09-16")))
+    assert not unplayed["is_final"].any() and unplayed["goals"].isna().all()

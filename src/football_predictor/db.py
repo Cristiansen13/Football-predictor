@@ -110,6 +110,8 @@ CREATE TABLE IF NOT EXISTS lineups (
     position     TEXT,
     is_starter   INTEGER NOT NULL,
     minutes      INTEGER,
+    xg           REAL,
+    xa           REAL,
     PRIMARY KEY (match_id, team_id, player_name)
 );
 """
@@ -188,7 +190,8 @@ class Database:
         self.path = Path(path)
         if str(path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(path))
+        # A long wait on the lock lets two ingests (say line-ups and ESPN) share one database.
+        self._conn = sqlite3.connect(str(path), timeout=60.0)
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(SCHEMA)
         self._migrate()
@@ -200,6 +203,11 @@ class Database:
         if "division" not in columns:
             with self._conn:
                 self._conn.execute("ALTER TABLE matches ADD COLUMN division TEXT NOT NULL DEFAULT 'E0'")
+        lineup_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(lineups)")}
+        for column in ("xg", "xa"):
+            if column not in lineup_columns:
+                with self._conn:
+                    self._conn.execute(f"ALTER TABLE lineups ADD COLUMN {column} REAL")
 
     def close(self) -> None:
         self._conn.close()

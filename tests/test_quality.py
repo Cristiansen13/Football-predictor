@@ -33,7 +33,8 @@ def test_validate_flags_real_problems(tmp_path):
     assert "[error] E0 2023: 4 clubs, expected 20" in text
     assert "results, expected 380" in text
     assert "xG on 0% of matches" in text
-    assert "no SOFIFA ratings" in text and "no FBref schedules" in text
+    assert "no lineups loaded" in text and "no all-competition schedules" in text
+    assert "no SOFIFA ratings" not in text  # only said once line-ups exist to rate
 
 
 def test_validate_empty_database(tmp_path):
