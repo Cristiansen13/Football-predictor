@@ -37,6 +37,7 @@ make data-full         # + SOFIFA ratings (behind Cloudflare at the moment)
 make status            # coverage per season, data issues, leakage audit
 make backtest          # tune ξ and xG weight on the two previous seasons, test on the last completed one
 make backtest-rolling  # one walk-forward over 2021/22-2025/26: five seasons of scored matches, per-season table
+make backtest-market   # price-shopping benchmark: the sharp closing line as fair value, bet the best price
 make predict           # this week's fixtures: probabilities, EV against current prices
 ```
 
@@ -49,7 +50,7 @@ Each target is a thin wrapper around the CLI:
 | `football-predictor status [--audit N]` | data coverage report, quality issues, point-in-time audit of N matches |
 | `football-predictor ratings [--as-of DATE]` | team attack/defence ratings |
 | `football-predictor predict HOME AWAY` / `--upcoming DAYS` | score grid, markets, best-EV bet and stake |
-| `football-predictor backtest [--test-season Y \| --test-seasons A-B] [--tune] [--compare] [--markets 1x2 totals]` | walk-forward evaluation and betting simulation, 1X2 and over/under 2.5 |
+| `football-predictor backtest [--test-season Y \| --test-seasons A-B] [--tune] [--compare] [--markets 1x2 totals] [--fair model\|market\|blend] [--price closing\|opening\|max]` | walk-forward evaluation and betting simulation, 1X2 and over/under 2.5 |
 
 Reports go to `data/reports/` (`metrics_<season>.json`, predictions, bets,
 calibration table, PnL curve and reliability diagram). Use `--data-dir` to move them.
@@ -178,9 +179,21 @@ the Premier League. Metrics:
   on the start-of-day bankroll with per-bet and per-day caps. Reported: ROI,
   drawdown, bets and ROI by market and by selection, and flat-stake ROI with a
   bootstrap interval and `p_flat_roi_le_zero`.
-* **Odds used:** Pinnacle closing, then market-average closing, then Bet365
-  closing, then pre-match prices, for both markets. The best-of-market "max"
-  price is never used. Over/under closing prices exist from 2019/20.
+* **Odds used:** the reference price is Pinnacle closing, then market-average
+  closing, then Bet365 closing, then pre-match prices, for both markets; it is
+  what forecasts are scored against. Over/under closing prices exist from
+  2019/20. Market probabilities are de-margined with the power method
+  (`implied_probabilities(..., "power")`; Shin's method is also available):
+  proportional scaling leaves longshots with too much probability, which made
+  them look like value when they were not.
+* **Fair value and price** (`--fair`, `--price`): the EV can be judged with the
+  model, with the de-margined closing line (the sharp price as fair value), or
+  a blend, and the bet struck at the closing reference, the earliest listed
+  price, or the best price across bookmakers (`max`). Every bet records its
+  closing-line value, `p_closing × odds − 1`: the return the closing line
+  expects for it. Average CLV is the yardstick that separates an edge from a
+  lucky run; `--fair market --price max` is the pure price-shopping benchmark
+  that needs no forecast at all.
 * **Several seasons at once:** `--test-seasons 2021-2025` runs one continuous
   walk-forward over five seasons (about 1,900 scored matches) and reports the
   per-season breakdown too. One season of 380 matches cannot separate a

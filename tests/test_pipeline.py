@@ -259,3 +259,14 @@ def test_over_under_prices_reach_the_dataset():
     assert (played["totals_market_time"] == "closing").all()
     upcoming = data[data["home_goals"].isna() & (data["division"] == "E0")]
     assert upcoming["odds_over_2_5"].notna().sum() == 2 and (upcoming["totals_bookmaker"].dropna() == "average").all()
+
+
+def test_dataset_carries_opening_and_best_prices():
+    db = Database(":memory:")
+    assert Pipeline(db, fake.FakeClient()).run([fake.SEASON], ["football_data"], upcoming=False) == []
+    data = db.load_match_dataset()
+    played = data[data["home_goals"].notna() & (data["division"] == "E0")]
+    assert played["open_home"].notna().all() and played["open_over_2_5"].notna().all()
+    assert (played["open_home"] != played["odds_home"]).any()  # opening differs from closing
+    assert "max_home" in data and "max_over_2_5" in data  # the toy files carry no Max columns, so NaN
+    assert played["max_home"].isna().all()

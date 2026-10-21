@@ -132,6 +132,37 @@ VIEWS = """
 DROP VIEW IF EXISTS v_match_dataset;
 DROP VIEW IF EXISTS v_best_odds;
 DROP VIEW IF EXISTS v_best_totals;
+DROP VIEW IF EXISTS v_open_odds;
+DROP VIEW IF EXISTS v_open_totals;
+
+-- Earliest listed price per fixture (Football-Data's pre-match column), sharp first.
+CREATE VIEW v_open_odds AS
+SELECT match_id, bookmaker, home, draw, away
+FROM (
+    SELECT o.*,
+           ROW_NUMBER() OVER (
+               PARTITION BY match_id
+               ORDER BY CASE bookmaker WHEN 'pinnacle' THEN 0 WHEN 'average' THEN 1
+                                       WHEN 'bet365' THEN 2 ELSE 3 END
+           ) AS rnk
+    FROM odds o
+    WHERE bookmaker <> 'max' AND market_time = 'opening'
+)
+WHERE rnk = 1;
+
+CREATE VIEW v_open_totals AS
+SELECT match_id, bookmaker, over, under
+FROM (
+    SELECT t.*,
+           ROW_NUMBER() OVER (
+               PARTITION BY match_id
+               ORDER BY CASE bookmaker WHEN 'pinnacle' THEN 0 WHEN 'average' THEN 1
+                                       WHEN 'bet365' THEN 2 ELSE 3 END
+           ) AS rnk
+    FROM totals_odds t
+    WHERE bookmaker <> 'max' AND market_time = 'opening' AND line = 2.5
+)
+WHERE rnk = 1;
 
 CREATE VIEW v_best_totals AS
 SELECT match_id, bookmaker, market_time, line, over, under
@@ -181,7 +212,11 @@ SELECT m.match_id, m.season, m.division, m.kickoff,
        o.bookmaker AS odds_bookmaker, o.market_time AS odds_market_time,
        o.home AS odds_home, o.draw AS odds_draw, o.away AS odds_away,
        t.bookmaker AS totals_bookmaker, t.market_time AS totals_market_time,
-       t.over AS odds_over_2_5, t.under AS odds_under_2_5
+       t.over AS odds_over_2_5, t.under AS odds_under_2_5,
+       op.home AS open_home, op.draw AS open_draw, op.away AS open_away,
+       mx.home AS max_home, mx.draw AS max_draw, mx.away AS max_away,
+       ot.over AS open_over_2_5, ot.under AS open_under_2_5,
+       mt.over AS max_over_2_5, mt.under AS max_under_2_5
 FROM matches m
 JOIN teams ht ON ht.team_id = m.home_team_id
 JOIN teams at ON at.team_id = m.away_team_id
@@ -190,7 +225,12 @@ LEFT JOIN advanced_stats aa ON aa.match_id = m.match_id AND aa.team_id = m.away_
 LEFT JOIN match_stats hs ON hs.match_id = m.match_id AND hs.team_id = m.home_team_id
 LEFT JOIN match_stats as_ ON as_.match_id = m.match_id AND as_.team_id = m.away_team_id
 LEFT JOIN v_best_odds o ON o.match_id = m.match_id
-LEFT JOIN v_best_totals t ON t.match_id = m.match_id;
+LEFT JOIN v_best_totals t ON t.match_id = m.match_id
+LEFT JOIN v_open_odds op ON op.match_id = m.match_id
+LEFT JOIN odds mx ON mx.match_id = m.match_id AND mx.bookmaker = 'max' AND mx.market_time = 'closing'
+LEFT JOIN v_open_totals ot ON ot.match_id = m.match_id
+LEFT JOIN totals_odds mt ON mt.match_id = m.match_id AND mt.bookmaker = 'max' AND mt.market_time = 'closing'
+    AND mt.line = 2.5;
 """
 
 SOURCE_RANK = {"football_data": 0, "fbref": 1, "understat": 2, "manual": 3}

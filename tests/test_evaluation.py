@@ -214,3 +214,78 @@ def test_two_way_markets_are_scored_and_bet(league):
     assert (settled["won"] == ((settled["selection"] == "over") == (settled["over"] == 1))).all()
     classic = simulate_betting(predictions, BettingStrategy(ev_threshold=0.0, markets=("1x2",)))[0]
     assert (classic["market"] == "1x2").all()
+
+
+def test_demargining_methods():
+    odds = np.array([[1.25, 6.0, 12.0], [2.9, 3.3, 2.6]])
+    for method in ("proportional", "power", "shin"):
+        probs = implied_probabilities(odds, method)
+        assert np.allclose(probs.sum(axis=1), 1.0) and (probs > 0).all()
+    proportional, power, shin = (implied_probabilities(odds, m) for m in ("proportional", "power", "shin"))
+    # Power and Shin take the margin mostly from the longshots: the favourite gains, the 12.0 shot loses.
+    assert power[0, 0] > proportional[0, 0] and shin[0, 0] > proportional[0, 0]
+    assert power[0, 2] < proportional[0, 2] and shin[0, 2] < proportional[0, 2]
+    assert np.allclose(power, shin, atol=0.01)
+    fair = np.array([[2.0, 4.0, 4.0]])  # no margin: every method returns the raw probabilities
+    for method in ("proportional", "power", "shin"):
+        assert np.allclose(implied_probabilities(fair, method), [[0.5, 0.25, 0.25]], atol=1e-6)
+
+
+def _priced_predictions():
+    """Six fixtures with closing, opening and best prices, where the model and the market disagree."""
+    kickoff = pd.date_range("2024-01-06 15:00", periods=6, freq="7D")
+    frame = pd.DataFrame(
+        {
+            "match_id": [f"m{i}" for i in range(6)], "kickoff": kickoff, "home_team": "A", "away_team": "B",
+            "p_home": [0.60, 0.30, 0.45, 0.50, 0.40, 0.35], "p_draw": [0.22, 0.30, 0.27, 0.25, 0.28, 0.30],
+            "p_away": [0.18, 0.40, 0.28, 0.25, 0.32, 0.35],
+            "odds_home": [1.9, 3.2, 2.2, 2.0, 2.5, 2.8], "odds_draw": [3.6, 3.3, 3.4, 3.5, 3.3, 3.2],
+            "odds_away": [4.2, 2.3, 3.4, 3.8, 2.9, 2.6],
+            "open_home": [2.0, 3.0, 2.3, 2.1, 2.4, 2.9], "open_draw": [3.5, 3.4, 3.4, 3.4, 3.4, 3.2],
+            "open_away": [4.0, 2.4, 3.3, 3.6, 3.0, 2.5],
+            "max_home": [2.05, 3.4, 2.3, 2.1, 2.6, 2.95], "max_draw": [3.8, 3.5, 3.6, 3.7, 3.5, 3.4],
+            "max_away": [4.5, 2.4, 3.6, 4.0, 3.05, 2.7],
+            "p_over_2_5": [0.6, 0.5, 0.55, 0.45, 0.5, 0.52], "p_under_2_5": [0.4, 0.5, 0.45, 0.55, 0.5, 0.48],
+            "odds_over_2_5": [1.8, 2.0, 1.9, 2.1, 2.0, 1.95], "odds_under_2_5": [2.0, 1.8, 1.9, 1.75, 1.8, 1.85],
+            "open_over_2_5": [1.85, 2.05, 1.9, 2.1, 1.95, 2.0], "open_under_2_5": [1.95, 1.75, 1.9, 1.75, 1.85, 1.8],
+            "max_over_2_5": [1.9, 2.1, 1.95, 2.15, 2.05, 2.0], "max_under_2_5": [2.1, 1.9, 1.95, 1.8, 1.9, 1.9],
+            "outcome": [0, 2, 1, 0, 2, 0], "over": [1, 0, 1, 0, 1, 1],
+        }
+    )
+    return frame
+
+
+def test_fair_value_source_and_price_options():
+    from football_predictor.evaluation.backtest import BettingStrategy, MARKET_DEMARGIN, simulate_betting
+
+    frame = _priced_predictions()
+    # Market as fair value at the closing reference price: the margin makes every EV negative.
+    bets, _ = simulate_betting(frame, BettingStrategy(ev_threshold=0.0, fair="market", price="closing"))
+    assert bets.empty
+    # Market as fair value at the best price: bets exactly where the best price beats the fair one.
+    bets, _ = simulate_betting(frame, BettingStrategy(ev_threshold=0.0, fair="market", price="max"))
+    assert len(bets) > 0 and (bets["clv"] > 0).all()
+    fair = implied_probabilities(frame[["odds_home", "odds_draw", "odds_away"]].to_numpy(), MARKET_DEMARGIN)
+    best = frame[["max_home", "max_draw", "max_away"]].to_numpy()
+    expected_1x2 = ((fair * best - 1) > 0).any(axis=1)
+    assert set(bets.loc[bets["market"] == "1x2", "match_id"]) == set(frame.loc[expected_1x2, "match_id"])
+    assert (bets["ev"] == bets["clv"]).all()  # fair value is the closing line, so EV is the closing-line value
+    # Model as fair value at the opening price: settled at the opening odds.
+    bets, _ = simulate_betting(frame, BettingStrategy(ev_threshold=0.0, fair="model", price="opening", markets=("1x2",)))
+    home = bets[bets["selection"] == "home"].merge(frame[["match_id", "open_home"]], on="match_id")
+    assert len(home) > 0 and (home["odds"] == home["open_home"]).all()
+    won = home[home["won"]]
+    assert np.allclose(won["profit"], won["stake"] * (won["open_home"] - 1))
+    # A blend is the average of the model and the closing-line probability for the selection picked.
+    blend_bets, _ = simulate_betting(frame, BettingStrategy(ev_threshold=-1.0, fair="blend", markets=("1x2",)))
+    assert len(blend_bets) == 6
+    closing = pd.DataFrame(fair, columns=["home", "draw", "away"], index=frame["match_id"])
+    model = frame.set_index("match_id")[["p_home", "p_draw", "p_away"]].set_axis(["home", "draw", "away"], axis=1)
+    for bet in blend_bets.itertuples(index=False):
+        expected = 0.5 * model.loc[bet.match_id, bet.selection] + 0.5 * closing.loc[bet.match_id, bet.selection]
+        assert bet.p_model == pytest.approx(expected)
+    # Asking for a price the data lacks falls back to the closing reference.
+    sparse = frame.drop(columns=[c for c in frame if c.startswith(("open_", "max_"))])
+    fallback, _ = simulate_betting(sparse, BettingStrategy(ev_threshold=0.0, price="max", markets=("1x2",)))
+    closing, _ = simulate_betting(sparse, BettingStrategy(ev_threshold=0.0, price="closing", markets=("1x2",)))
+    pd.testing.assert_frame_equal(fallback, closing)

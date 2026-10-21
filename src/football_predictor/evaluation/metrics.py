@@ -37,10 +37,52 @@ def log_loss(probabilities: np.ndarray, outcomes: np.ndarray, eps: float = 1e-15
     return float(-np.mean(np.log(picked)))
 
 
-def implied_probabilities(odds: np.ndarray) -> np.ndarray:
-    """Bookmaker probabilities with the overround removed proportionally."""
+def implied_probabilities(odds: np.ndarray, method: str = "proportional") -> np.ndarray:
+    """Bookmaker probabilities with the overround removed.
+
+    ``proportional`` scales every price by the same factor, which leaves
+    longshots with too much probability (the favourite-longshot bias sits in
+    the margin, not evenly across prices). ``power`` raises each raw
+    probability to the exponent that makes the row sum to one, taking more
+    margin from longshots; ``shin`` is Shin's (1993) insider-trading model.
+    Power and Shin give near-identical numbers; both price favourites higher
+    than the proportional method does, which is what matters when a price is
+    judged against the "fair" one.
+    """
     raw = 1.0 / np.asarray(odds, dtype=float)
-    return raw / raw.sum(axis=1, keepdims=True)
+    if raw.ndim != 2:
+        raise ValueError("odds must be a 2-D array: one row per event")
+    if method == "proportional":
+        return raw / raw.sum(axis=1, keepdims=True)
+    if method == "power":
+        return _power_demargin(raw)
+    if method == "shin":
+        return _shin_demargin(raw)
+    raise ValueError(f"unknown de-margining method {method!r}")
+
+
+def _power_demargin(raw: np.ndarray, iterations: int = 60) -> np.ndarray:
+    low, high = np.ones(len(raw)), np.full(len(raw), 4.0)
+    for _ in range(iterations):
+        k = (low + high) / 2
+        total = (raw ** k[:, None]).sum(axis=1)
+        low, high = np.where(total > 1, k, low), np.where(total > 1, high, k)
+    return raw ** ((low + high) / 2)[:, None]
+
+
+def _shin_demargin(raw: np.ndarray, iterations: int = 60) -> np.ndarray:
+    total = raw.sum(axis=1, keepdims=True)
+
+    def probabilities(z):
+        z = z[:, None]
+        return (np.sqrt(z ** 2 + 4 * (1 - z) * raw ** 2 / total) - z) / (2 * (1 - z))
+
+    low, high = np.zeros(len(raw)), np.full(len(raw), 0.5)
+    for _ in range(iterations):
+        z = (low + high) / 2
+        over = probabilities(z).sum(axis=1) > 1
+        low, high = np.where(over, z, low), np.where(over, high, z)
+    return probabilities((low + high) / 2)
 
 
 def overround(odds: np.ndarray) -> np.ndarray:
@@ -114,10 +156,10 @@ def binary_log_loss(probability, outcome, eps: float = 1e-15) -> float:
     return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
 
 
-def two_way_probabilities(over_odds, under_odds) -> np.ndarray:
+def two_way_probabilities(over_odds, under_odds, method: str = "proportional") -> np.ndarray:
     """De-margined (p_over, p_under) from a pair of decimal prices."""
     return implied_probabilities(np.column_stack([np.asarray(over_odds, dtype=float),
-                                                  np.asarray(under_odds, dtype=float)]))
+                                                  np.asarray(under_odds, dtype=float)]), method)
 
 
 def bootstrap_interval(

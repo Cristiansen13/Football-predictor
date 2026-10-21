@@ -318,8 +318,8 @@ METRIC_SECTIONS = {
         "mean_overround_totals", "btts_rate", "brier_btts_model", "log_loss_btts_model"],
     "Betting": ["bets", "staked", "profit", "roi", "final_bankroll", "bankroll_growth", "max_drawdown",
                 "hit_rate", "mean_odds", "mean_ev", "flat_stake_profit_units", "flat_stake_roi",
-                "flat_roi_ci_low", "flat_roi_ci_high", "p_flat_roi_le_zero",
-                "bets_1x2", "flat_stake_roi_1x2", "bets_totals", "flat_stake_roi_totals",
+                "flat_roi_ci_low", "flat_roi_ci_high", "p_flat_roi_le_zero", "mean_clv",
+                "bets_1x2", "flat_stake_roi_1x2", "clv_1x2", "bets_totals", "flat_stake_roi_totals", "clv_totals",
                 "bets_home", "roi_home", "bets_draw", "roi_draw", "bets_away", "roi_away",
                 "bets_over", "roi_over", "bets_under", "roi_under"],
 }
@@ -346,6 +346,7 @@ def season_breakdown(result: BacktestResult) -> pd.DataFrame:
                 "brier_over_market": m.get("brier_over_market", np.nan),
                 "bets": len(picked),
                 "flat_stake_roi": float(flat.mean()) if len(flat) else np.nan,
+                "clv": float(picked["clv"].mean()) if len(picked) else np.nan,
             }
         )
     return pd.DataFrame(rows)
@@ -418,6 +419,9 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         max_stake_fraction=args.max_stake,
         max_odds=args.max_odds,
         markets=tuple(args.markets),
+        fair=args.fair,
+        blend_weight=args.blend_weight,
+        price=args.price,
     )
     reports = Path(args.reports_dir)
     if args.compare:
@@ -443,7 +447,7 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     )
     print(f"Test {'season' if label == str(test_season) else 'seasons'} {label} ({args.division}) | "
           f"xi={args.xi} | xg_weight={args.xg_weight} | features={args.features} | "
-          f"markets={','.join(args.markets)}")
+          f"markets={','.join(args.markets)} | fair={args.fair} | price={args.price}")
     print_metrics(result.metrics)
     if last_season != test_season:
         print("  Per season")
@@ -545,6 +549,13 @@ def build_parser() -> argparse.ArgumentParser:
                              "and per season (far more matches than one season can offer)")
         bt.add_argument("--markets", nargs="+", choices=["1x2", "totals"], default=["1x2", "totals"],
                         help="markets the EV search may bet (default: both)")
+        bt.add_argument("--fair", choices=["model", "market", "blend"], default="model",
+                        help="probability the EV is judged with: the model, the de-margined closing line "
+                             "(sharp price as fair value), or a blend (default: model)")
+        bt.add_argument("--blend-weight", type=float, default=0.5, help="weight on the market in --fair blend")
+        bt.add_argument("--price", choices=["closing", "opening", "max"], default="closing",
+                        help="price to bet at: the closing reference, the earliest listed price, or the best "
+                             "price across bookmakers (default: closing)")
         bt.add_argument("--tune", "--tune-xi", dest="tune", action="store_true",
                         help="pick xi and xg_weight on the seasons before the test season")
         bt.add_argument("--tune-seasons", type=int, default=2, metavar="N",

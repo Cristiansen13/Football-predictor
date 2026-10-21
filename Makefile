@@ -44,5 +44,8 @@ TEST_SEASONS ?= 2021-2025
 backtest-rolling:   ## one walk-forward across several seasons, reported overall and per season
 	$(CLI) backtest --tune --features lineup --test-seasons $(TEST_SEASONS)
 
+backtest-market:    ## price-shopping benchmark: Pinnacle closing as fair value, bet the best price across bookmakers
+	$(CLI) backtest --features lineup --xi 0.003 --xg-weight 0.6 --fair market --price max --test-seasons 2019-2025
+
 predict:            ## this week's fixtures with probabilities and EV
 	$(CLI) predict --upcoming 7 --features lineup
