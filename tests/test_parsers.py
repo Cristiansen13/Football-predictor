@@ -141,3 +141,15 @@ def test_espn_scoreboard_and_cup_schedule():
 
     unplayed = espn.parse_scoreboard(fake.espn_scoreboard_json(pd.Timestamp("2023-09-16")))
     assert not unplayed["is_final"].any() and unplayed["goals"].isna().all()
+
+
+def test_football_data_over_under_prices():
+    totals = football_data.parse_season_totals(fake.football_data_csv(), 2023)
+    assert set(totals["bookmaker"]) == {"bet365", "pinnacle", "average"}
+    assert set(totals["market_time"]) == {"opening", "closing"} and (totals["line"] == 2.5).all()
+    pinnacle_closing = totals[(totals["bookmaker"] == "pinnacle") & (totals["market_time"] == "closing")]
+    assert len(pinnacle_closing) == 10 and pinnacle_closing.iloc[0][["over", "under"]].tolist() == [1.88, 2.02]
+
+    upcoming = football_data.parse_fixtures_totals(fake.fixtures_csv())
+    assert len(upcoming) == 2 and set(upcoming["bookmaker"]) == {"average"}  # Scottish row dropped
+    assert (upcoming["market_time"] == "opening").all() and upcoming.iloc[0]["over"] == 2.05

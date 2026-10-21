@@ -59,13 +59,15 @@ def fixtures() -> pd.DataFrame:
 
 def football_data_csv() -> str:
     header = ("Div,Date,Time,HomeTeam,AwayTeam,FTHG,FTAG,FTR,HS,AS,HST,AST,B365H,B365D,B365A,"
-              "PSH,PSD,PSA,AvgH,AvgD,AvgA,B365CH,B365CD,B365CA,PSCH,PSCD,PSCA,AvgCH,AvgCD,AvgCA")
+              "PSH,PSD,PSA,AvgH,AvgD,AvgA,B365CH,B365CD,B365CA,PSCH,PSCD,PSCA,AvgCH,AvgCD,AvgCA,"
+              "B365>2.5,B365<2.5,P>2.5,P<2.5,PC>2.5,PC<2.5,AvgC>2.5,AvgC<2.5")
     lines = [header]
     for row in fixtures().itertuples():
         if row.home_goals is None or pd.isna(row.home_goals):
             continue
         ftr = "H" if row.home_goals > row.away_goals else "D" if row.home_goals == row.away_goals else "A"
-        odds = "2.10,3.40,3.60,2.15,3.45,3.70,2.05,3.35,3.55,2.00,3.50,3.80,2.08,3.55,3.90,2.02,3.45,3.70"
+        odds = ("2.10,3.40,3.60,2.15,3.45,3.70,2.05,3.35,3.55,2.00,3.50,3.80,2.08,3.55,3.90,2.02,3.45,3.70,"
+                "1.90,1.95,1.92,1.98,1.88,2.02,1.86,2.00")
         lines.append(
             f"E0,{row.kickoff:%d/%m/%Y},{row.kickoff:%H:%M},{CLUBS[row.home]['fd']},{CLUBS[row.away]['fd']},"
             f"{int(row.home_goals)},{int(row.away_goals)},{ftr},12,9,5,3,{odds}"
@@ -95,10 +97,10 @@ def championship_csv() -> str:
 def fixtures_csv() -> str:
     """Football-Data's weekly fixtures list: the two unplayed matches, plus a Scottish one."""
     return (
-        "Div,Date,Time,HomeTeam,AwayTeam,B365H,B365D,B365A,PSH,PSD,PSA,AvgH,AvgD,AvgA\n"
-        "E0,16/09/2023,15:00,Wolves,Man United,3.10,3.50,2.30,3.20,3.55,2.35,3.05,3.45,2.28\n"
-        "E0,16/09/2023,17:00,Nott'm Forest,Man City,9.00,5.50,1.33,9.50,5.60,1.35,8.80,5.40,1.32\n"
-        "SC0,16/09/2023,15:00,Celtic,Rangers,1.80,3.80,4.20,1.82,3.85,4.30,1.79,3.75,4.10\n"
+        "Div,Date,Time,HomeTeam,AwayTeam,B365H,B365D,B365A,PSH,PSD,PSA,AvgH,AvgD,AvgA,Avg>2.5,Avg<2.5\n"
+        "E0,16/09/2023,15:00,Wolves,Man United,3.10,3.50,2.30,3.20,3.55,2.35,3.05,3.45,2.28,2.05,1.80\n"
+        "E0,16/09/2023,17:00,Nott'm Forest,Man City,9.00,5.50,1.33,9.50,5.60,1.35,8.80,5.40,1.32,1.60,2.35\n"
+        "SC0,16/09/2023,15:00,Celtic,Rangers,1.80,3.80,4.20,1.82,3.85,4.30,1.79,3.75,4.10,1.70,2.15\n"
     )
 
 

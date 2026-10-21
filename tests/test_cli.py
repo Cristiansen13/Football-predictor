@@ -103,3 +103,14 @@ def test_training_divisions_default_to_the_predicted_division(tmp_path, capsys, 
     assert divisions(None) == {"E0"}
     assert divisions(["all"]) == {"E0", "E1"}
     assert divisions(["E1"]) == {"E0", "E1"}  # the predicted division is always kept
+
+
+def test_backtest_over_several_seasons_reports_each(tmp_path, capsys):
+    main(["--data-dir", str(tmp_path), "demo", "--test-seasons", "2022-2023", "--refit-days", "28",
+          "--markets", "totals"])
+    out = capsys.readouterr().out
+    assert "Test seasons 2022-2023" in out and "markets=totals" in out
+    assert "Per season" in out and "brier_over_market" in out
+    assert (tmp_path / "reports" / "metrics_2022-2023.json").exists()
+    metrics = json.loads((tmp_path / "reports" / "metrics_2022-2023.json").read_text())
+    assert metrics["matches"] == 760 and metrics["bets_1x2"] == 0

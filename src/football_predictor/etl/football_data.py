@@ -29,6 +29,19 @@ ODDS_COLUMNS = {
     "max": {"closing": ("MaxCH", "MaxCD", "MaxCA"), "opening": ("MaxH", "MaxD", "MaxA")},
 }
 
+# Over/under 2.5 goals: bookmaker -> market time -> (over, under) columns. Before
+# 2019/20 the files carry only the Betbrain market max and average, opening only.
+TOTALS_LINE = 2.5
+TOTALS_COLUMNS = {
+    "pinnacle": {"closing": ("PC>2.5", "PC<2.5"), "opening": ("P>2.5", "P<2.5")},
+    "average": {"closing": ("AvgC>2.5", "AvgC<2.5"), "opening": ("Avg>2.5", "Avg<2.5")},
+    "average_legacy": {"opening": ("BbAv>2.5", "BbAv<2.5")},
+    "bet365": {"closing": ("B365C>2.5", "B365C<2.5"), "opening": ("B365>2.5", "B365<2.5")},
+    "max": {"closing": ("MaxC>2.5", "MaxC<2.5"), "opening": ("Max>2.5", "Max<2.5")},
+    "max_legacy": {"opening": ("BbMx>2.5", "BbMx<2.5")},
+}
+TOTALS_FIELDS = ["season", "home_team", "away_team", "bookmaker", "market_time", "line", "over", "under"]
+
 STAT_COLUMNS = {
     "HS": "home_shots",
     "AS": "away_shots",
@@ -79,6 +92,43 @@ def _odds_long(raw: pd.DataFrame, matches: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=ODDS_FIELDS)
     odds = pd.concat(frames, ignore_index=True)
     return odds.drop_duplicates(["season", "home_team", "away_team", "bookmaker", "market_time"]).reset_index(drop=True)
+
+
+def _totals_long(raw: pd.DataFrame, matches: pd.DataFrame) -> pd.DataFrame:
+    frames = []
+    for bookmaker, markets in TOTALS_COLUMNS.items():
+        for market_time, columns in markets.items():
+            if not all(c in raw for c in columns):
+                continue
+            block = raw[list(columns)].apply(pd.to_numeric, errors="coerce")
+            block.columns = ["over", "under"]
+            block.insert(0, "line", TOTALS_LINE)
+            block.insert(0, "market_time", market_time)
+            block.insert(0, "bookmaker", bookmaker.removesuffix("_legacy"))
+            block.insert(0, "away_team", matches["away_team"].to_numpy())
+            block.insert(0, "home_team", matches["home_team"].to_numpy())
+            block.insert(0, "season", matches["season"].to_numpy())
+            frames.append(block.dropna(subset=["over", "under"]))
+    if not frames:
+        return pd.DataFrame(columns=TOTALS_FIELDS)
+    totals = pd.concat(frames, ignore_index=True)
+    keys = ["season", "home_team", "away_team", "bookmaker", "market_time", "line"]
+    return totals.drop_duplicates(keys).reset_index(drop=True)
+
+
+def parse_season_totals(csv_text: str, season: int, division: str = "E0") -> pd.DataFrame:
+    """Over/under 2.5 prices of one season file, long format like :func:`parse_season`'s odds."""
+    matches, _ = parse_season(csv_text, season, division)
+    return _totals_long(_read_csv(csv_text).reset_index(drop=True), matches)
+
+
+def parse_fixtures_totals(csv_text: str, divisions=("E0", "E1")) -> pd.DataFrame:
+    """Current over/under 2.5 prices for the coming week's fixtures."""
+    raw = _read_csv(csv_text)
+    raw = raw[raw["Div"].astype(str).str.strip().isin(divisions)].reset_index(drop=True)
+    matches, _ = parse_fixtures(csv_text, divisions)
+    totals = _totals_long(raw, matches)
+    return totals[totals["market_time"] == "opening"].reset_index(drop=True)
 
 
 def parse_season(csv_text: str, season: int, division: str = "E0") -> tuple[pd.DataFrame, pd.DataFrame]:

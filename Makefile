@@ -40,5 +40,9 @@ status:             ## coverage per season, data issues, leakage audit
 backtest:           ## tune on the two previous seasons, test on the last completed one
 	$(CLI) backtest --tune --features lineup --compare $(SEASON_ARG)
 
+TEST_SEASONS ?= 2021-2025
+backtest-rolling:   ## one walk-forward across several seasons, reported overall and per season
+	$(CLI) backtest --tune --features lineup --test-seasons $(TEST_SEASONS)
+
 predict:            ## this week's fixtures with probabilities and EV
 	$(CLI) predict --upcoming 7 --features lineup

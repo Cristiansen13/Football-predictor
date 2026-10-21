@@ -93,6 +93,17 @@ CREATE TABLE IF NOT EXISTS odds (
     PRIMARY KEY (match_id, bookmaker, market_time)
 );
 
+-- Over/under prices per fixture, bookmaker, market time and goal line.
+CREATE TABLE IF NOT EXISTS totals_odds (
+    match_id     TEXT NOT NULL REFERENCES matches(match_id),
+    bookmaker    TEXT NOT NULL,
+    market_time  TEXT NOT NULL,
+    line         REAL NOT NULL,
+    over         REAL NOT NULL,
+    under        REAL NOT NULL,
+    PRIMARY KEY (match_id, bookmaker, market_time, line)
+);
+
 CREATE TABLE IF NOT EXISTS player_ratings (
     player_id      TEXT NOT NULL,
     player_name    TEXT NOT NULL,
@@ -120,6 +131,22 @@ CREATE TABLE IF NOT EXISTS lineups (
 VIEWS = """
 DROP VIEW IF EXISTS v_match_dataset;
 DROP VIEW IF EXISTS v_best_odds;
+DROP VIEW IF EXISTS v_best_totals;
+
+CREATE VIEW v_best_totals AS
+SELECT match_id, bookmaker, market_time, line, over, under
+FROM (
+    SELECT t.*,
+           ROW_NUMBER() OVER (
+               PARTITION BY match_id
+               ORDER BY CASE market_time WHEN 'closing' THEN 0 ELSE 1 END,
+                        CASE bookmaker WHEN 'pinnacle' THEN 0 WHEN 'average' THEN 1
+                                       WHEN 'bet365' THEN 2 ELSE 3 END
+           ) AS rnk
+    FROM totals_odds t
+    WHERE bookmaker <> 'max' AND line = 2.5
+)
+WHERE rnk = 1;
 
 -- Reference price per fixture: closing before opening, sharp before soft. The
 -- best-of-market "max" price is excluded: no single bettor could get it.
@@ -152,7 +179,9 @@ SELECT m.match_id, m.season, m.division, m.kickoff,
        hs.shots AS home_shots, as_.shots AS away_shots,
        hs.shots_on_target AS home_shots_on_target, as_.shots_on_target AS away_shots_on_target,
        o.bookmaker AS odds_bookmaker, o.market_time AS odds_market_time,
-       o.home AS odds_home, o.draw AS odds_draw, o.away AS odds_away
+       o.home AS odds_home, o.draw AS odds_draw, o.away AS odds_away,
+       t.bookmaker AS totals_bookmaker, t.market_time AS totals_market_time,
+       t.over AS odds_over_2_5, t.under AS odds_under_2_5
 FROM matches m
 JOIN teams ht ON ht.team_id = m.home_team_id
 JOIN teams at ON at.team_id = m.away_team_id
@@ -160,7 +189,8 @@ LEFT JOIN advanced_stats ha ON ha.match_id = m.match_id AND ha.team_id = m.home_
 LEFT JOIN advanced_stats aa ON aa.match_id = m.match_id AND aa.team_id = m.away_team_id
 LEFT JOIN match_stats hs ON hs.match_id = m.match_id AND hs.team_id = m.home_team_id
 LEFT JOIN match_stats as_ ON as_.match_id = m.match_id AND as_.team_id = m.away_team_id
-LEFT JOIN v_best_odds o ON o.match_id = m.match_id;
+LEFT JOIN v_best_odds o ON o.match_id = m.match_id
+LEFT JOIN v_best_totals t ON t.match_id = m.match_id;
 """
 
 SOURCE_RANK = {"football_data": 0, "fbref": 1, "understat": 2, "manual": 3}
@@ -309,6 +339,9 @@ class Database:
 
     def upsert_odds(self, frame: pd.DataFrame) -> None:
         self._upsert("odds", ["match_id", "bookmaker", "market_time"], frame)
+
+    def upsert_totals_odds(self, frame: pd.DataFrame) -> None:
+        self._upsert("totals_odds", ["match_id", "bookmaker", "market_time", "line"], frame)
 
     def upsert_player_ratings(self, frame: pd.DataFrame) -> None:
         self._upsert("player_ratings", ["player_id", "snapshot_date"], frame)

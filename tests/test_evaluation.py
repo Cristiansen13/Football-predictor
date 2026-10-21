@@ -161,7 +161,8 @@ def test_report_metrics_and_files(league, tmp_path):
         assert key in m, key
     assert m["brier_diff_ci_low"] <= m["brier_diff_vs_market"] <= m["brier_diff_ci_high"]
     assert m["brier_skill_vs_base_rate"] > 0  # beats always forecasting the historical frequencies
-    assert m["bets_home"] + m["bets_draw"] + m["bets_away"] == m["bets"]
+    assert m["bets_home"] + m["bets_draw"] + m["bets_away"] + m["bets_over"] + m["bets_under"] == m["bets"]
+    assert m["bets_1x2"] + m["bets_totals"] == m["bets"]
     paths = save_report(result, tmp_path, "2022")
     assert all(path.exists() for path in paths.values())
     assert json.loads(paths["metrics"].read_text())["matches"] == 380
@@ -190,3 +191,26 @@ def test_tune_hyperparameters_parallel_matches_serial(league):
     serial = tune_hyperparameters(league[league["kickoff"] < end], grid, start, end, refit_days=56)
     parallel = tune_hyperparameters(league[league["kickoff"] < end], grid, start, end, refit_days=56, n_jobs=2)
     pd.testing.assert_frame_equal(serial, parallel)
+
+
+def test_two_way_markets_are_scored_and_bet(league):
+    from football_predictor.evaluation.backtest import BettingStrategy, evaluate_forecasts, simulate_betting
+
+    start = league.loc[league["season"] == 2022, "kickoff"].min().normalize()
+    predictions = walk_forward_predictions(league, DixonColesModel, start, refit_days=56, divisions=["E0"])
+    assert set(predictions["over"].unique()) <= {0, 1} and set(predictions["btts"].unique()) <= {0, 1}
+    metrics = evaluate_forecasts(predictions, n_resamples=200)
+    assert 0 < metrics["brier_over_model"] < 0.25 and 0 < metrics["brier_btts_model"] < 0.25
+    assert metrics["matches_with_totals_odds"] == len(predictions)
+    assert "brier_over_market" in metrics and "over_diff_ci_low" in metrics
+
+    both = simulate_betting(predictions, BettingStrategy(ev_threshold=0.0))[0]
+    assert set(both["market"]) == {"1x2", "totals"}
+    assert set(both.loc[both["market"] == "totals", "selection"]) <= {"over", "under"}
+    totals_only = simulate_betting(predictions, BettingStrategy(ev_threshold=0.0, markets=("totals",)))[0]
+    assert (totals_only["market"] == "totals").all() and len(totals_only) > 0
+    # Settlement follows the goal total, not the 1X2 outcome.
+    settled = totals_only.merge(predictions[["match_id", "over"]], on="match_id")
+    assert (settled["won"] == ((settled["selection"] == "over") == (settled["over"] == 1))).all()
+    classic = simulate_betting(predictions, BettingStrategy(ev_threshold=0.0, markets=("1x2",)))[0]
+    assert (classic["market"] == "1x2").all()

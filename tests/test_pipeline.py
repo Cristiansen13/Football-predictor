@@ -247,3 +247,15 @@ def test_lineups_store_player_xg_and_xa_and_old_lineup_tables_are_migrated(tmp_p
     row = migrated.query("SELECT xg, xa, minutes FROM lineups").iloc[0]
     assert pd.isna(row["xg"]) and pd.isna(row["xa"]) and row["minutes"] == 90
     migrated.close()
+
+
+def test_over_under_prices_reach_the_dataset():
+    db = Database(":memory:")
+    pipeline = Pipeline(db, fake.FakeClient(), current_season=fake.SEASON)  # so fixtures.csv is loaded too
+    assert pipeline.run([fake.SEASON], ["football_data"], upcoming=True) == []
+    data = db.load_match_dataset()
+    played = data[data["home_goals"].notna() & (data["division"] == "E0")]  # the toy E1 file has no totals
+    assert played["odds_over_2_5"].notna().all() and (played["totals_bookmaker"] == "pinnacle").all()
+    assert (played["totals_market_time"] == "closing").all()
+    upcoming = data[data["home_goals"].isna() & (data["division"] == "E0")]
+    assert upcoming["odds_over_2_5"].notna().sum() == 2 and (upcoming["totals_bookmaker"].dropna() == "average").all()

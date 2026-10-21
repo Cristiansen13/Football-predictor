@@ -37,6 +37,7 @@ from .evaluation import (
     save_report,
     tune_hyperparameters,
 )
+from .evaluation.backtest import BacktestResult, evaluate_forecasts
 from .features import audit_point_in_time, build_features, lineup_strength, player_form_strength
 from .models import FEATURE_PRESETS, DixonColesModel
 from .quality import coverage_report, validate
@@ -311,11 +312,43 @@ METRIC_SECTIONS = {
     "Against the market": ["matches_with_odds", "brier_model_priced", "brier_market", "brier_skill_vs_market",
                            "brier_diff_vs_market", "brier_diff_ci_low", "brier_diff_ci_high", "rps_market",
                            "log_loss_market", "accuracy_market", "ece_market", "mean_overround"],
+    "Over/under 2.5 and both teams to score": [
+        "matches_with_totals_odds", "over_rate", "brier_over_model", "brier_over_market",
+        "brier_over_diff_vs_market", "over_diff_ci_low", "over_diff_ci_high", "log_loss_over_model",
+        "mean_overround_totals", "btts_rate", "brier_btts_model", "log_loss_btts_model"],
     "Betting": ["bets", "staked", "profit", "roi", "final_bankroll", "bankroll_growth", "max_drawdown",
                 "hit_rate", "mean_odds", "mean_ev", "flat_stake_profit_units", "flat_stake_roi",
-                "flat_roi_ci_low", "flat_roi_ci_high", "p_flat_roi_le_zero", "bets_home", "roi_home",
-                "bets_draw", "roi_draw", "bets_away", "roi_away"],
+                "flat_roi_ci_low", "flat_roi_ci_high", "p_flat_roi_le_zero",
+                "bets_1x2", "flat_stake_roi_1x2", "bets_totals", "flat_stake_roi_totals",
+                "bets_home", "roi_home", "bets_draw", "roi_draw", "bets_away", "roi_away",
+                "bets_over", "roi_over", "bets_under", "roi_under"],
 }
+
+
+def season_breakdown(result: BacktestResult) -> pd.DataFrame:
+    """Forecast quality and flat-stake betting per season of a multi-season backtest."""
+    bets = result.bets
+    if not bets.empty:
+        bets = bets.assign(season=[season_from_date(k) for k in pd.to_datetime(bets["kickoff"])])
+    rows = []
+    for season, predictions in result.predictions.groupby("season"):
+        m = evaluate_forecasts(predictions, n_resamples=0)
+        picked = bets[bets["season"] == season] if not bets.empty else bets
+        flat = np.where(picked["won"], picked["odds"] - 1.0, -1.0).astype(float) if len(picked) else np.array([])
+        rows.append(
+            {
+                "season": int(season),
+                "matches": len(predictions),
+                "brier_model": m["brier_model"],
+                "brier_market": m.get("brier_market", np.nan),
+                "diff_vs_market": m.get("brier_diff_vs_market", np.nan),
+                "brier_over_model": m.get("brier_over_model", np.nan),
+                "brier_over_market": m.get("brier_over_market", np.nan),
+                "bets": len(picked),
+                "flat_stake_roi": float(flat.mean()) if len(flat) else np.nan,
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def print_metrics(metrics: dict) -> None:
@@ -354,8 +387,15 @@ def default_test_season(data: pd.DataFrame, division: str) -> int:
 def cmd_backtest(args: argparse.Namespace) -> None:
     data = load_features(args)
     divisions = [args.division]
-    test_season = args.test_season if args.test_season is not None else default_test_season(data, args.division)
-    start, end = _season_window(data, test_season, args.division)
+    if args.test_seasons:
+        test_seasons = parse_seasons(args.test_seasons)
+    else:
+        test_seasons = [args.test_season if args.test_season is not None
+                        else default_test_season(data, args.division)]
+    test_season, last_season = min(test_seasons), max(test_seasons)
+    start, _ = _season_window(data, test_season, args.division)
+    _, end = _season_window(data, last_season, args.division)
+    label = f"{test_season}" if last_season == test_season else f"{test_season}-{last_season}"
 
     if args.tune:
         val_start, _ = _season_window(data, test_season - args.tune_seasons, args.division)
@@ -377,6 +417,7 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         kelly_multiplier=args.kelly,
         max_stake_fraction=args.max_stake,
         max_odds=args.max_odds,
+        markets=tuple(args.markets),
     )
     reports = Path(args.reports_dir)
     if args.compare:
@@ -388,23 +429,29 @@ def cmd_backtest(args: argparse.Namespace) -> None:
                                   strategy=strategy, initial_bankroll=args.bankroll, divisions=divisions)
             rows.append({"features": preset, **result.metrics})
         table = pd.DataFrame(rows)
-        columns = ["features", "brier_model", "brier_market", "log_loss_model", "score_log_loss_model",
-                   "ece_model", "bets", "roi", "flat_stake_roi", "p_flat_roi_le_zero"]
-        print(f"Feature presets on season {test_season} (xi={args.xi}, xg_weight={args.xg_weight}):")
+        columns = ["features", "brier_model", "brier_market", "brier_over_model", "brier_over_market",
+                   "log_loss_model", "ece_model", "bets", "roi", "flat_stake_roi", "p_flat_roi_le_zero"]
+        print(f"Feature presets on {'season' if label == str(test_season) else 'seasons'} {label} "
+              f"(xi={args.xi}, xg_weight={args.xg_weight}):")
         print(table[[c for c in columns if c in table]].round(4).to_string(index=False))
         reports.mkdir(parents=True, exist_ok=True)
-        table.to_csv(reports / f"comparison_{test_season}.csv", index=False)
+        table.to_csv(reports / f"comparison_{label}.csv", index=False)
 
     result = run_backtest(
         data, model_factory(args), start, end,
         refit_days=args.refit_days, strategy=strategy, initial_bankroll=args.bankroll, divisions=divisions,
     )
-    print(f"Test season {test_season} ({args.division}) | xi={args.xi} | xg_weight={args.xg_weight} | "
-          f"features={args.features}")
+    print(f"Test {'season' if label == str(test_season) else 'seasons'} {label} ({args.division}) | "
+          f"xi={args.xi} | xg_weight={args.xg_weight} | features={args.features} | "
+          f"markets={','.join(args.markets)}")
     print_metrics(result.metrics)
-    label = f"{test_season}"
-    paths = save_report(result, reports, label,
-                        title=f"Cumulative PnL, season {test_season}/{(test_season + 1) % 100:02d}")
+    if last_season != test_season:
+        print("  Per season")
+        print(season_breakdown(result).round(4).to_string(index=False))
+    title = (f"Cumulative PnL, season {test_season}/{(test_season + 1) % 100:02d}" if last_season == test_season
+             else f"Cumulative PnL, seasons {test_season}/{(test_season + 1) % 100:02d} to "
+                  f"{last_season}/{(last_season + 1) % 100:02d}")
+    paths = save_report(result, reports, label, title=title)
     if args.plot:
         Path(args.plot).parent.mkdir(parents=True, exist_ok=True)
         Path(args.plot).write_bytes(paths["pnl_plot"].read_bytes())
@@ -492,7 +539,12 @@ def build_parser() -> argparse.ArgumentParser:
                             ("demo", "backtest on a simulated league (no network needed)")):
         bt = sub.add_parser(name, help=help_text)
         model_options(bt)
-        bt.add_argument("--test-season", type=int, default=None)
+        bt.add_argument("--test-season", type=int, default=None, help="default: the last completed season")
+        bt.add_argument("--test-seasons", default=None, metavar="RANGE",
+                        help="e.g. 2021-2025: one walk-forward across several seasons, reported overall "
+                             "and per season (far more matches than one season can offer)")
+        bt.add_argument("--markets", nargs="+", choices=["1x2", "totals"], default=["1x2", "totals"],
+                        help="markets the EV search may bet (default: both)")
         bt.add_argument("--tune", "--tune-xi", dest="tune", action="store_true",
                         help="pick xi and xg_weight on the seasons before the test season")
         bt.add_argument("--tune-seasons", type=int, default=2, metavar="N",

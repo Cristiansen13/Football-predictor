@@ -81,6 +81,16 @@ class Pipeline:
             odds.loc[odds["match_id"].isin(known), ["match_id", "bookmaker", "market_time", "home", "draw", "away"]]
         )
 
+    def _load_totals(self, totals: pd.DataFrame, create_missing: bool) -> None:
+        if totals.empty:
+            return
+        totals = self._with_match_ids(self._with_team_ids(totals, "football_data", create_missing=create_missing))
+        known = self.db.existing_match_ids()
+        self.db.upsert_totals_odds(
+            totals.loc[totals["match_id"].isin(known),
+                       ["match_id", "bookmaker", "market_time", "line", "over", "under"]]
+        )
+
     def load_football_data(self, season: int, division: str = "E0") -> None:
         csv_text = football_data.fetch_season_csv(self.client, season, division, **self._cache(season))
         matches, odds = football_data.parse_season(csv_text, season, division)
@@ -105,19 +115,22 @@ class Pipeline:
         )
         self.db.upsert_match_stats(stats)
         self._load_odds(odds, create)
-        log.info("football-data %s %s: %d matches, %d odds rows", division, season, len(matches), len(odds))
+        totals = football_data.parse_season_totals(csv_text, season, division)
+        self._load_totals(totals, create)
+        log.info("football-data %s %s: %d matches, %d odds rows, %d over/under rows",
+                 division, season, len(matches), len(odds), len(totals))
 
     def load_upcoming_fixtures(self) -> None:
         """This week's fixtures with current prices (Football-Data ``fixtures.csv``)."""
-        matches, odds = football_data.parse_fixtures(
-            football_data.fetch_fixtures_csv(self.client), self.divisions
-        )
+        csv_text = football_data.fetch_fixtures_csv(self.client)
+        matches, odds = football_data.parse_fixtures(csv_text, self.divisions)
         if matches.empty:
             log.info("football-data fixtures: none listed")
             return
         matches = self._with_match_ids(self._with_team_ids(matches, "football_data", create_missing=True))
         self.db.upsert_matches(matches, "football_data")
         self._load_odds(odds, True)
+        self._load_totals(football_data.parse_fixtures_totals(csv_text, self.divisions), True)
         log.info("football-data fixtures: %d upcoming matches", len(matches))
 
     def load_understat(self, season: int, *, lineups: bool = False) -> None:
@@ -355,11 +368,11 @@ def probe_sources(
     if "football_data" in sources:
         for division in DIVISIONS:
             def check_fd(division=division):
-                matches, odds = football_data.parse_season(
-                    football_data.fetch_season_csv(client, season, division, use_cache=False), season, division
-                )
+                csv_text = football_data.fetch_season_csv(client, season, division, use_cache=False)
+                matches, odds = football_data.parse_season(csv_text, season, division)
+                totals = football_data.parse_season_totals(csv_text, season, division)
                 closing = (odds["market_time"] == "closing").sum() if not odds.empty else 0
-                return len(matches), f"{closing} closing-odds rows"
+                return len(matches), f"{closing} closing-odds rows, {len(totals)} over/under rows"
             attempt(f"football_data:{division}", check_fd)
 
     if "understat" in sources:

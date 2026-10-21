@@ -18,6 +18,10 @@ from ..models.dixon_coles import DixonColesModel
 from .betting import expected_value, kelly_fraction
 from .metrics import (
     accuracy,
+    binary_brier,
+    binary_brier_per_match,
+    binary_log_loss,
+    two_way_probabilities,
     bootstrap_interval,
     brier_per_match,
     brier_score,
@@ -33,9 +37,12 @@ from .metrics import (
 
 log = logging.getLogger(__name__)
 
-SELECTIONS = np.array(["home", "draw", "away"])
+SELECTIONS = np.array(["home", "draw", "away", "over", "under"])
 PROB_COLUMNS = ["p_home", "p_draw", "p_away"]
 ODDS_COLUMNS = ["odds_home", "odds_draw", "odds_away"]
+TOTALS_PROB_COLUMNS = ["p_over_2_5", "p_under_2_5"]
+TOTALS_ODDS_COLUMNS = ["odds_over_2_5", "odds_under_2_5"]
+MARKETS = {"1x2": (0, 1, 2), "totals": (3, 4)}
 
 
 @dataclass
@@ -46,6 +53,7 @@ class BettingStrategy:
     max_daily_exposure: float = 0.5
     min_odds: float = 1.01
     max_odds: float = 15.0
+    markets: tuple[str, ...] = ("1x2", "totals")
 
 
 @dataclass
@@ -102,6 +110,10 @@ def walk_forward_predictions(
         raise ValueError(f"No played matches between {start} and {end}")
     predictions = pd.concat(blocks).reset_index(drop=True)
     predictions["outcome"] = outcome_index(predictions["home_goals"], predictions["away_goals"])
+    goals_home = predictions["home_goals"].to_numpy(dtype=float)
+    goals_away = predictions["away_goals"].to_numpy(dtype=float)
+    predictions["over"] = (goals_home + goals_away > 2.5).astype(int)
+    predictions["btts"] = ((goals_home > 0) & (goals_away > 0)).astype(int)
     return predictions
 
 
@@ -167,7 +179,84 @@ def evaluate_forecasts(
             if n_resamples:
                 low, high, _ = bootstrap_interval(np.mean, diff, n_resamples=n_resamples)
                 metrics["brier_diff_ci_low"], metrics["brier_diff_ci_high"] = low, high
+    metrics.update(evaluate_two_way_markets(predictions, n_resamples=n_resamples))
     return metrics
+
+
+def evaluate_two_way_markets(predictions: pd.DataFrame, *, n_resamples: int = 2000) -> dict:
+    """Over/under 2.5 (against the market where priced) and both teams to score."""
+    metrics: dict = {}
+    if "over" in predictions and "p_over_2_5" in predictions:
+        over = predictions["over"].to_numpy(dtype=float)
+        p_over = predictions["p_over_2_5"].to_numpy(dtype=float)
+        metrics.update(
+            {
+                "over_rate": float(over.mean()),
+                "brier_over_model": binary_brier(p_over, over),
+                "log_loss_over_model": binary_log_loss(p_over, over),
+            }
+        )
+        if all(c in predictions for c in TOTALS_ODDS_COLUMNS):
+            priced = predictions.dropna(subset=TOTALS_ODDS_COLUMNS)
+            if not priced.empty:
+                market = two_way_probabilities(priced["odds_over_2_5"], priced["odds_under_2_5"])[:, 0]
+                y = priced["over"].to_numpy(dtype=float)
+                model = priced["p_over_2_5"].to_numpy(dtype=float)
+                diff = binary_brier_per_match(model, y) - binary_brier_per_match(market, y)
+                metrics.update(
+                    {
+                        "matches_with_totals_odds": len(priced),
+                        "brier_over_model_priced": binary_brier(model, y),
+                        "brier_over_market": binary_brier(market, y),
+                        "brier_over_diff_vs_market": float(diff.mean()),
+                        "mean_overround_totals": float(
+                            overround(priced[TOTALS_ODDS_COLUMNS].to_numpy(dtype=float)).mean()
+                        ),
+                    }
+                )
+                if n_resamples:
+                    low, high, _ = bootstrap_interval(np.mean, diff, n_resamples=n_resamples)
+                    metrics["over_diff_ci_low"], metrics["over_diff_ci_high"] = low, high
+    if "btts" in predictions and "p_btts" in predictions:
+        btts = predictions["btts"].to_numpy(dtype=float)
+        p_btts = predictions["p_btts"].to_numpy(dtype=float)
+        metrics.update(
+            {
+                "btts_rate": float(btts.mean()),
+                "brier_btts_model": binary_brier(p_btts, btts),
+                "log_loss_btts_model": binary_log_loss(p_btts, btts),
+            }
+        )
+    return metrics
+
+
+def _selection_frame(predictions: pd.DataFrame, strategy: BettingStrategy) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
+    """Rows with at least one allowed, priced selection; probability, odds and
+    de-margined market probability per selection (NaN where a market is unpriced)."""
+    n = len(predictions)
+    probs = np.full((n, len(SELECTIONS)), np.nan)
+    odds = np.full((n, len(SELECTIONS)), np.nan)
+    market = np.full((n, len(SELECTIONS)), np.nan)
+    if "1x2" in strategy.markets and all(c in predictions for c in ODDS_COLUMNS):
+        probs[:, :3] = predictions[PROB_COLUMNS].to_numpy(dtype=float)
+        odds[:, :3] = predictions[ODDS_COLUMNS].to_numpy(dtype=float)
+        priced = ~np.isnan(odds[:, :3]).any(axis=1)
+        market[priced, :3] = implied_probabilities(odds[priced, :3])
+    if "totals" in strategy.markets and all(c in predictions for c in TOTALS_ODDS_COLUMNS + TOTALS_PROB_COLUMNS):
+        probs[:, 3:] = predictions[TOTALS_PROB_COLUMNS].to_numpy(dtype=float)
+        odds[:, 3:] = predictions[TOTALS_ODDS_COLUMNS].to_numpy(dtype=float)
+        priced = ~np.isnan(odds[:, 3:]).any(axis=1)
+        market[priced, 3:] = implied_probabilities(odds[priced, 3:])
+    allowed = np.isfinite(odds) & np.isfinite(probs) & (odds >= strategy.min_odds) & (odds <= strategy.max_odds)
+    keep = allowed.any(axis=1)
+    return predictions[keep].reset_index(drop=True), probs[keep], np.where(allowed[keep], odds[keep], np.nan), market[keep]
+
+
+def _won(selection_index: np.ndarray, frame: pd.DataFrame) -> np.ndarray:
+    outcome = frame["outcome"].to_numpy()
+    over = frame["over"].to_numpy() if "over" in frame else np.zeros(len(frame), dtype=int)
+    return np.where(selection_index < 3, selection_index == outcome,
+                    np.where(selection_index == 3, over == 1, over == 0))
 
 
 def simulate_betting(
@@ -175,35 +264,35 @@ def simulate_betting(
     strategy: BettingStrategy | None = None,
     initial_bankroll: float = 1000.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Bet the highest-EV outcome of each match when EV clears the threshold.
+    """Bet the highest-EV selection of each match when EV clears the threshold.
 
-    Stakes are fractional Kelly on the bankroll at the start of each match day,
-    capped per bet and per day, and settled at the published decimal odds.
-    Returns (bets, equity curve by day).
+    Selections span the markets in ``strategy.markets``: home/draw/away at the
+    1X2 prices and over/under 2.5 goals at the totals prices. Stakes are
+    fractional Kelly on the bankroll at the start of each match day, capped
+    per bet and per day, and settled at the published decimal odds. Returns
+    (bets, equity curve by day).
     """
     strategy = strategy or BettingStrategy()
-    priced = predictions.dropna(subset=ODDS_COLUMNS).sort_values("kickoff").reset_index(drop=True)
-    probabilities = priced[PROB_COLUMNS].to_numpy(dtype=float)
-    odds = priced[ODDS_COLUMNS].to_numpy(dtype=float)
-    ev = expected_value(probabilities, odds)
-    allowed = (odds >= strategy.min_odds) & (odds <= strategy.max_odds)
-    ev_allowed = np.where(allowed, ev, -np.inf)
-    pick = ev_allowed.argmax(axis=1)
+    ordered = predictions.sort_values("kickoff").reset_index(drop=True)
+    priced, probabilities, odds, market = _selection_frame(ordered, strategy)
+    ev = np.where(np.isnan(odds), -np.inf, expected_value(np.nan_to_num(probabilities), np.nan_to_num(odds, nan=1.0)))
+    pick = ev.argmax(axis=1) if len(priced) else np.array([], dtype=int)
     rows = np.arange(len(priced))
     candidates = priced.assign(
         selection_index=pick,
         selection=SELECTIONS[pick],
+        market=np.where(pick < 3, "1x2", "totals"),
         odds=odds[rows, pick],
         p_model=probabilities[rows, pick],
-        p_market=implied_probabilities(odds)[rows, pick] if len(priced) else [],
-        ev=ev_allowed[rows, pick],
+        p_market=market[rows, pick],
+        ev=ev[rows, pick],
         kelly=kelly_fraction(probabilities[rows, pick], odds[rows, pick]),
     )
     candidates = candidates[candidates["ev"] > strategy.ev_threshold]
 
     bankroll = initial_bankroll
-    equity = [{"date": priced["kickoff"].min().normalize() - pd.Timedelta(days=1), "bankroll": bankroll}] if len(
-        priced
+    equity = [{"date": ordered["kickoff"].min().normalize() - pd.Timedelta(days=1), "bankroll": bankroll}] if len(
+        ordered
     ) else []
     bets = []
     for day, day_bets in candidates.groupby(candidates["kickoff"].dt.normalize()):
@@ -212,14 +301,14 @@ def simulate_betting(
         cap = strategy.max_daily_exposure * bankroll
         if stakes.sum() > cap:
             stakes *= cap / stakes.sum()
-        won = day_bets["selection_index"].to_numpy() == day_bets["outcome"].to_numpy()
+        won = _won(day_bets["selection_index"].to_numpy(), day_bets)
         profit = np.where(won, stakes * (day_bets["odds"].to_numpy() - 1.0), -stakes)
         bankroll += profit.sum()
         bets.append(day_bets.assign(stake=stakes, won=won, profit=profit, bankroll_after=bankroll))
         equity.append({"date": day, "bankroll": bankroll})
 
     columns = [
-        "match_id", "kickoff", "home_team", "away_team", "selection", "odds", "p_model",
+        "match_id", "kickoff", "home_team", "away_team", "market", "selection", "odds", "p_model",
         "p_market", "ev", "kelly", "stake", "won", "profit", "bankroll_after",
     ]
     bets_frame = pd.concat(bets, ignore_index=True)[columns] if bets else pd.DataFrame(columns=columns)
@@ -266,6 +355,11 @@ def betting_metrics(
         metrics[f"roi_{selection}"] = (
             float(picked["profit"].sum() / picked["stake"].sum()) if len(picked) else float("nan")
         )
+    for market in MARKETS:
+        picked = bets[bets["market"] == market] if "market" in bets else bets.iloc[0:0]
+        metrics[f"bets_{market}"] = len(picked)
+        flat = np.where(picked["won"], picked["odds"] - 1.0, -1.0).astype(float)
+        metrics[f"flat_stake_roi_{market}"] = float(flat.mean()) if len(picked) else float("nan")
     return metrics
 
 

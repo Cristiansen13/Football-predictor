@@ -35,7 +35,8 @@ make data-fbref        # possession and cup fixtures from FBref instead (see the
 make data-lineups      # + starting XIs with each player's xG/xA from 2022/23 (about 25 min per season, resumable)
 make data-full         # + SOFIFA ratings (behind Cloudflare at the moment)
 make status            # coverage per season, data issues, leakage audit
-make backtest          # tune ξ and xG weight on the previous season, test on the last one
+make backtest          # tune ξ and xG weight on the two previous seasons, test on the last completed one
+make backtest-rolling  # one walk-forward over 2021/22-2025/26: five seasons of scored matches, per-season table
 make predict           # this week's fixtures: probabilities, EV against current prices
 ```
 
@@ -48,7 +49,7 @@ Each target is a thin wrapper around the CLI:
 | `football-predictor status [--audit N]` | data coverage report, quality issues, point-in-time audit of N matches |
 | `football-predictor ratings [--as-of DATE]` | team attack/defence ratings |
 | `football-predictor predict HOME AWAY` / `--upcoming DAYS` | score grid, markets, best-EV bet and stake |
-| `football-predictor backtest [--test-season Y] [--tune] [--compare]` | walk-forward evaluation and betting simulation |
+| `football-predictor backtest [--test-season Y \| --test-seasons A-B] [--tune] [--compare] [--markets 1x2 totals]` | walk-forward evaluation and betting simulation, 1X2 and over/under 2.5 |
 
 Reports go to `data/reports/` (`metrics_<season>.json`, predictions, bets,
 calibration table, PnL curve and reliability diagram). Use `--data-dir` to move them.
@@ -57,7 +58,7 @@ calibration table, PnL curve and reliability diagram). Use `--data-dir` to move 
 
 | Source | Module | Method | Loaded into |
 | :--- | :--- | :--- | :--- |
-| Football-Data.co.uk | `etl/football_data.py` | direct CSV, Premier League (`E0`) and Championship (`E1`), plus the weekly `fixtures.csv` | `matches`, `odds` (opening/closing per bookmaker), shot counts |
+| Football-Data.co.uk | `etl/football_data.py` | direct CSV, Premier League (`E0`) and Championship (`E1`), plus the weekly `fixtures.csv` | `matches`, `odds` (1X2, opening/closing per bookmaker), `totals_odds` (over/under 2.5), shot counts |
 | Understat | `etl/understat.py` | regex over `JSON.parse('\x..')` script tags; falls back to its JSON endpoint | `advanced_stats` (xG, npxG, PPDA, deep completions; xA from match rosters), `lineups` |
 | ESPN | `etl/espn.py` | public JSON endpoints of ESPN's own site (no key, not a documented API) | `match_stats` (possession, shots), `team_schedule` (league, cups, Europe) |
 | FBref | `etl/fbref.py` | BeautifulSoup over `data-stat` cells, including tables hidden in HTML comments | `matches`, `match_stats` (possession, shots), `team_schedule` (all competitions) |
@@ -167,12 +168,23 @@ the Premier League. Metrics:
   Brier skill against the market, and a paired-bootstrap 95% interval for
   "model Brier − market Brier". An edge is only credible if the interval stays
   below zero.
-* **Betting:** highest-EV outcome when `EV = P_model × odds − 1 > threshold`,
-  fractional Kelly stakes on the start-of-day bankroll with per-bet and per-day
-  caps. Reported: ROI, drawdown, ROI by selection (home/draw/away), and
-  flat-stake ROI with a bootstrap interval and `p_flat_roi_le_zero`.
+* **Over/under 2.5 and both teams to score:** binary Brier and log loss of
+  `p_over_2_5` against the de-margined over/under prices (paired bootstrap
+  interval, as for 1X2) and of `p_btts` against the outcome (Football-Data
+  carries no BTTS prices).
+* **Betting:** highest-EV selection per match across the markets in
+  `--markets` (home/draw/away at the 1X2 prices, over/under at the totals
+  prices) when `EV = P_model × odds − 1 > threshold`, fractional Kelly stakes
+  on the start-of-day bankroll with per-bet and per-day caps. Reported: ROI,
+  drawdown, bets and ROI by market and by selection, and flat-stake ROI with a
+  bootstrap interval and `p_flat_roi_le_zero`.
 * **Odds used:** Pinnacle closing, then market-average closing, then Bet365
-  closing, then pre-match prices. The best-of-market "max" price is never used.
+  closing, then pre-match prices, for both markets. The best-of-market "max"
+  price is never used. Over/under closing prices exist from 2019/20.
+* **Several seasons at once:** `--test-seasons 2021-2025` runs one continuous
+  walk-forward over five seasons (about 1,900 scored matches) and reports the
+  per-season breakdown too. One season of 380 matches cannot separate a
+  0.002 Brier difference from noise; five can come close.
 
 `--compare` reruns the season once per feature preset. Choose presets on an
 earlier season (`--test-season` one year back) and score the final season only
@@ -180,36 +192,55 @@ once with the chosen setup. Otherwise the choice itself leaks test information.
 
 ## Results on real data
 
-`make backtest` in October 2026: walk-forward over 2025/26 (380 matches,
-weekly refits, ξ and xG weight tuned on 2023/24–2024/25):
+`make backtest-rolling` in October 2026: one walk-forward over 2021/22 to
+2025/26 (1,900 Premier League matches, weekly refits, Premier League training
+data only, ξ and xG weight tuned on 2019/20–2020/21, `lineup` features), scored
+against Pinnacle or market-average closing prices.
 
-| Forecast | Brier | Brier minus closing market | 95% bootstrap interval |
-| :--- | :--- | :--- | :--- |
-| Dixon-Coles, Premier League data only, `lineup` features | 0.612 | +0.003 | −0.008 to +0.013 |
-| Same with `form` features | 0.614 | +0.005 | −0.006 to +0.015 |
-| Same, trained on both divisions | 0.624 | +0.015 | +0.005 to +0.026 |
-| Closing market (de-margined) | 0.609 | — | — |
+| Market | Model Brier | Market Brier | Model minus market | 95% bootstrap interval |
+| :--- | :--- | :--- | :--- | :--- |
+| 1X2 (three-way Brier) | 0.579 | 0.567 | +0.012 | +0.007 to +0.017 |
+| Over/under 2.5 (binary Brier) | 0.242 | 0.240 | +0.002 | −0.000 to +0.004 |
+| Both teams to score (binary Brier, no market prices) | 0.246 | — | — | — |
 
-The model is now statistically indistinguishable from the closing line but not
-better than it, and no variant tried beats it: 64 hyperparameter settings sit within 0.005 Brier of each other on
-2025/26; non-penalty xG, a 9-goal grid, ρ = 0, daily refits and the `form`
-features change nothing material; recalibrating the model or stacking it with
-opening odds on the previous season stays behind the closing line; and every
-EV threshold and odds cap that looked profitable on 2024/25 lost on 2025/26.
-Treat the betting simulation as a test of edge, which currently finds none,
-rather than a strategy. More seasons would not change this: at the tuned decay
-the fit effectively uses about 530 matches, 94% of them from the last two
-seasons. What the market knows and the model cannot see is squad change:
-transfers, injuries and line-ups.
+| Season | 1X2 model | 1X2 market | Over 2.5 model | Over 2.5 market |
+| :--- | :--- | :--- | :--- | :--- |
+| 2021/22 | 0.565 | 0.554 | 0.242 | 0.247 |
+| 2022/23 | 0.595 | 0.571 | 0.241 | 0.238 |
+| 2023/24 | 0.544 | 0.526 | 0.232 | 0.227 |
+| 2024/25 | 0.579 | 0.575 | 0.245 | 0.242 |
+| 2025/26 | 0.612 | 0.609 | 0.249 | 0.247 |
 
-With ESPN schedules and Understat line-ups loaded (five seasons of starting
-XIs with each player's xG and xA), the same three-season test shows: cup and
-European fixtures in the fatigue index, and possession, change nothing (every
-variant within 0.0005 Brier of the plain model); the starting XI's form
-(`lineup` preset) is the first feature to help on all three seasons, mean
-Brier 0.578 against 0.580 for the plain model and 0.612 against 0.613 on
-2025/26. Small, but it is the one thing the market prices that the team
-ratings do not carry, and `make data-lineups` collects it.
+What this says:
+
+* **On match results the model is clearly behind the closing line.** One
+  season (2025/26, +0.003) looked like parity; five seasons put the gap at
+  +0.012 with an interval that excludes zero. The single-season numbers
+  reported earlier were noise around that.
+* **On goal totals it is level with the market.** The interval spans zero and
+  the model beat the totals market in 2021/22. A goal-rate model is naturally
+  stronger here than on the result, but "level" is not an edge.
+* **No betting edge in either market.** Flat-stake ROI over 1,638 bets is
+  −7.1% (interval −15.6% to +1.9%); −7.7% on 1X2 and −4.9% on totals. Treat the
+  simulation as a test of edge rather than a strategy.
+* **Features barely matter.** Over five seasons the presets sit within 0.002
+  Brier of each other (`form` 0.577, `none` 0.578, `full` 0.578, `lineup`
+  0.579). Line-up form helped on the three seasons where players have a year
+  of history and hurt in 2022/23, its first season of data. Cup fixtures in
+  the fatigue index and possession change nothing.
+* **Hyperparameters barely matter** either: 64 settings within 0.005 Brier of
+  each other on one season, and their ranking flips between seasons, which is
+  why tuning uses two validation seasons.
+* **More of the same data would not help.** At the tuned decay the fit
+  effectively uses about 530 matches, 94% from the last two seasons.
+  Training on both divisions made promoted clubs worse (0.624 against 0.614
+  on 2025/26); recalibration, stacking with opening odds and betting filters
+  did not move the result.
+
+What the market knows and the model cannot see is squad change before kickoff:
+transfers, injuries and the expected line-up. ESPN supplies the schedules and
+possession FBref used to, and Understat line-ups stand in for SOFIFA ratings;
+both are collected by `make data` and `make data-lineups`.
 
 ## Caveats
 

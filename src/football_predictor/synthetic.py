@@ -117,6 +117,13 @@ def simulate_league(
                 noisy = np.exp(np.log(probs) + rng.normal(0, bookmaker_noise_sd, probs.shape))
                 book = noisy / noisy.sum(axis=1, keepdims=True)
                 odds = np.round(1.0 / (book * (1.0 + bookmaker_margin)), 2)
+                # Over/under 2.5 from the same score grid, priced the same way.
+                goals = np.add.outer(np.arange(11), np.arange(11))
+                p_over = matrices[:, goals > 2.5].sum(axis=1)
+                totals = np.column_stack([p_over, 1.0 - p_over])
+                noisy_totals = np.exp(np.log(totals) + rng.normal(0, bookmaker_noise_sd, totals.shape))
+                totals_book = noisy_totals / noisy_totals.sum(axis=1, keepdims=True)
+                totals_odds = np.round(1.0 / (totals_book * (1.0 + bookmaker_margin)), 2)
 
                 for k, (home, away) in enumerate(fixtures):
                     flat = matrices[k].ravel()
@@ -141,6 +148,8 @@ def simulate_league(
                             "odds_home": odds[k, 0],
                             "odds_draw": odds[k, 1],
                             "odds_away": odds[k, 2],
+                            "odds_over_2_5": totals_odds[k, 0],
+                            "odds_under_2_5": totals_odds[k, 1],
                         }
                     )
                     match_number += 1

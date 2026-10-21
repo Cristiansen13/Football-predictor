@@ -94,6 +94,32 @@ def expected_calibration_error(probabilities: np.ndarray, outcomes: np.ndarray, 
     return float(np.average(gap, weights=table["count"]))
 
 
+# -- two-way markets (over/under, both teams to score) -------------------------
+
+
+def binary_brier(probability, outcome) -> float:
+    """Mean squared error of a yes/no forecast; 0 is perfect, 0.25 is the coin flip."""
+    p, y = np.asarray(probability, dtype=float), np.asarray(outcome, dtype=float)
+    return float(np.mean((p - y) ** 2))
+
+
+def binary_brier_per_match(probability, outcome) -> np.ndarray:
+    p, y = np.asarray(probability, dtype=float), np.asarray(outcome, dtype=float)
+    return (p - y) ** 2
+
+
+def binary_log_loss(probability, outcome, eps: float = 1e-15) -> float:
+    p = np.clip(np.asarray(probability, dtype=float), eps, 1 - eps)
+    y = np.asarray(outcome, dtype=float)
+    return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
+
+def two_way_probabilities(over_odds, under_odds) -> np.ndarray:
+    """De-margined (p_over, p_under) from a pair of decimal prices."""
+    return implied_probabilities(np.column_stack([np.asarray(over_odds, dtype=float),
+                                                  np.asarray(under_odds, dtype=float)]))
+
+
 def bootstrap_interval(
     statistic,
     *arrays: np.ndarray,
