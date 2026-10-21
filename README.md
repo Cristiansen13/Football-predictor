@@ -114,13 +114,18 @@ log μ = c[div]          + attack[away] + defence[home] + θ_att·A(away) + θ_d
 * **Dixon-Coles core.** The ρ correction applies to 0-0, 1-0, 0-1 and 1-1, and
   each match is weighted by `exp(−ξ·days)`. The fit is L-BFGS-B with an analytic
   gradient (checked against finite differences) and warm starts between refits.
-* **Premier League and Championship on one scale.** Clubs carry their ratings
-  through promotion and relegation, while each division keeps its own scoring
-  level and home advantage. The ridge penalty shrinks each club towards its own
-  division's mean. Within-division matches can't reveal how strong a division
-  is as a whole, so a single shared target would overrate Championship clubs.
-  On simulated leagues this halves the rating error for newly promoted clubs
-  and lowers their early-season Brier score.
+* **Training divisions.** The model can rate Premier League and Championship
+  clubs on one scale (`--train-divisions E0 E1` or `all`): clubs carry their
+  ratings through promotion and relegation, each division keeps its own scoring
+  level and home advantage, and the ridge penalty shrinks each club towards its
+  own division's mean. On simulated leagues this halves the rating error for
+  newly promoted clubs. On real data it does the opposite, so the default
+  trains on the predicted division only: Burnley and Leeds dominated the
+  2024/25 Championship and carried ratings into 2025/26 far above what the
+  market gave them, while Sunderland was under-rated. Matches involving the
+  three promoted clubs accounted for nearly the whole of the model's deficit
+  to the market that season; with Premier League data only, a promoted club
+  starts at the unseen-club quantile and is learnt from its top-flight matches.
 * **xG in the likelihood** (`--xg-weight`, CLI default 0.3). Each match
   contributes `(1−a)·log L(goals) + a·log L(xG)`. Ratings settle faster because
   xG is far less noisy than goals. Matches without xG (the Championship) use
@@ -130,7 +135,11 @@ log μ = c[div]          + attack[away] + defence[home] + θ_att·A(away) + θ_d
   fatigue and lineup fraction). `--attack-features` / `--defence-features`
   override them.
 * **Tuning.** `backtest --tune` grid-searches ξ × xG weight by walk-forward
-  Brier score on the season before the test season.
+  Brier score on the seasons before the test season (`--tune-seasons`, default
+  2, in `--jobs` parallel processes). One validation season is not enough: on
+  real data the ranking of settings between 2023/24 and 2024/25 had a rank
+  correlation of −0.8, and the setting chosen on one season alone was the worst
+  of the grid on the next.
 
 ## 4. Probability matrix
 
@@ -141,7 +150,8 @@ aggregates the grid into home/draw/away, over/under 2.5 and both-teams-to-score.
 ## 5. Validation and backtesting
 
 `run_backtest` refits every `--refit-days` using only matches before each block.
-It trains on every loaded division and scores only the Premier League. Metrics:
+It trains on `--train-divisions` (default: the scored division) and scores only
+the Premier League. Metrics:
 
 * **Forecast quality:** Brier (primary), RPS, log loss, exact-score log loss,
   accuracy, expected calibration error, and Brier skill against the historical
@@ -160,6 +170,29 @@ It trains on every loaded division and scores only the Premier League. Metrics:
 `--compare` reruns the season once per feature preset. Choose presets on an
 earlier season (`--test-season` one year back) and score the final season only
 once with the chosen setup. Otherwise the choice itself leaks test information.
+
+## Results on real data
+
+`make backtest` in October 2026: walk-forward over 2025/26 (380 matches,
+weekly refits, ξ and xG weight tuned on 2023/24–2024/25, `form` features):
+
+| Forecast | Brier | Brier minus closing market | 95% bootstrap interval |
+| :--- | :--- | :--- | :--- |
+| Dixon-Coles, Premier League data only | 0.614 | +0.005 | −0.006 to +0.015 |
+| Same, trained on both divisions | 0.624 | +0.015 | +0.005 to +0.026 |
+| Closing market (de-margined) | 0.609 | — | — |
+
+The model is now statistically indistinguishable from the closing line but not
+better than it, and no variant tried beats it: 64 hyperparameter settings sit within 0.005 Brier of each other on
+2025/26; non-penalty xG, a 9-goal grid, ρ = 0, daily refits and the `form`
+features change nothing material; recalibrating the model or stacking it with
+opening odds on the previous season stays behind the closing line; and every
+EV threshold and odds cap that looked profitable on 2024/25 lost on 2025/26.
+Treat the betting simulation as a test of edge, which currently finds none,
+rather than a strategy. More seasons would not change this: at the tuned decay
+the fit effectively uses about 530 matches, 94% of them from the last two
+seasons. What the market knows and the model cannot see is squad change:
+transfers, injuries and line-ups.
 
 ## Caveats
 

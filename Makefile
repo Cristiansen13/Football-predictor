@@ -34,7 +34,7 @@ data-full: data     ## + starting XIs and SOFIFA ratings (slow: hours on first r
 status:             ## coverage per season, data issues, leakage audit
 	$(CLI) status --audit 20
 
-backtest:           ## tune on the previous season, test on the last one
+backtest:           ## tune on the two previous seasons, test on the last completed one
 	$(CLI) backtest --tune --features form --compare $(SEASON_ARG)
 
 predict:            ## this week's fixtures with probabilities and EV

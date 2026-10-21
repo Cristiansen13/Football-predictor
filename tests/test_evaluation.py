@@ -181,3 +181,12 @@ def test_tune_hyperparameters_grid(league):
                                   start, end, refit_days=56)
     assert len(scores) == 4 and {"xi", "xg_weight", "brier_model"} <= set(scores.columns)
     assert scores["brier_model"].is_monotonic_increasing
+
+
+def test_tune_hyperparameters_parallel_matches_serial(league):
+    start = league.loc[league["season"] == 2021, "kickoff"].min().normalize()
+    end = league.loc[league["season"] == 2022, "kickoff"].min().normalize()
+    grid = {"xi": [0.001, 0.004], "xg_weight": [0.0, 0.5]}
+    serial = tune_hyperparameters(league[league["kickoff"] < end], grid, start, end, refit_days=56)
+    parallel = tune_hyperparameters(league[league["kickoff"] < end], grid, start, end, refit_days=56, n_jobs=2)
+    pd.testing.assert_frame_equal(serial, parallel)

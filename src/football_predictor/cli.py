@@ -42,8 +42,9 @@ from .models import FEATURE_PRESETS, DixonColesModel
 from .quality import coverage_report, validate
 from .synthetic import simulate_league
 
-TUNING_GRID = {"xi": [0.001, 0.0015, 0.002, 0.003, 0.004], "xg_weight": [0.0, 0.3, 0.6]}
+TUNING_GRID = {"xi": [0.002, 0.003, 0.004, 0.006], "xg_weight": [0.3, 0.6, 0.8]}
 FIRST_SEASON = 2014
+DEFAULT_JOBS = max(1, (os.cpu_count() or 2) - 2)
 
 
 def current_season() -> int:
@@ -84,9 +85,9 @@ def load_inputs(args: argparse.Namespace) -> tuple[pd.DataFrame, pd.DataFrame | 
     lineups = lineup_strength(db.load_lineups(), db.load_player_ratings())
     lineups = lineups.assign(team=lineups["team_id"].map(names))
     db.close()
-    if args.train_divisions:
-        keep = set(args.train_divisions) | {args.division}
-        matches = matches[matches["division"].isin(keep)]
+    train = args.train_divisions or [args.division]
+    if "all" not in train:
+        matches = matches[matches["division"].isin(set(train) | {args.division})]
     return matches, schedule, lineups
 
 
@@ -186,7 +187,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     issues = validate(report, current_season())
     print("\nNo data issues found." if not issues else "\n" + "\n".join(map(str, issues)))
     if args.audit:
-        args.synthetic, args.train_divisions = False, None
+        args.synthetic, args.train_divisions = False, ["all"]
         matches, schedule, lineups = load_inputs(args)
         problems = audit_point_in_time(
             matches, schedule=schedule, lineups=lineups, sample=args.audit, halflife_days=args.halflife
@@ -349,12 +350,15 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     start, end = _season_window(data, test_season, args.division)
 
     if args.tune:
-        val_start, _ = _season_window(data, test_season - 1, args.division)
+        val_start, _ = _season_window(data, test_season - args.tune_seasons, args.division)
         base = {k: v for k, v in model_kwargs(args).items() if k not in TUNING_GRID}
         scores = tune_hyperparameters(
             data[data["kickoff"] < start], TUNING_GRID, val_start, start, model_kwargs=base, divisions=divisions,
+            n_jobs=args.jobs,
         )
-        print(f"Hyperparameters validated on season {test_season - 1} (best first):")
+        validated = (f"season {test_season - 1}" if args.tune_seasons == 1
+                     else f"seasons {test_season - args.tune_seasons}-{test_season - 1}")
+        print(f"Hyperparameters validated on {validated} (best first):")
         print(scores[list(TUNING_GRID) + ["brier_model", "log_loss_model", "score_log_loss_model"]]
               .head(8).round(5).to_string(index=False))
         args.xi = float(scores.loc[0, "xi"])
@@ -456,7 +460,8 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--halflife", type=float, default=45.0, help="EWMA half-life in days")
         p.add_argument("--division", default="E0", help="division to rate / predict / evaluate")
         p.add_argument("--train-divisions", nargs="+", default=None,
-                       help="divisions to train on (default: all loaded)")
+                       help="divisions to train on, or 'all' (default: only --division; on real data the "
+                            "Championship dominance of promoted clubs misleads their Premier League ratings)")
 
     ratings = sub.add_parser("ratings", help="fit the model and print team strengths")
     model_options(ratings)
@@ -480,7 +485,10 @@ def build_parser() -> argparse.ArgumentParser:
         model_options(bt)
         bt.add_argument("--test-season", type=int, default=None)
         bt.add_argument("--tune", "--tune-xi", dest="tune", action="store_true",
-                        help="pick xi and xg_weight on the season before the test season")
+                        help="pick xi and xg_weight on the seasons before the test season")
+        bt.add_argument("--tune-seasons", type=int, default=2, metavar="N",
+                        help="validate on the N seasons before the test season (default: %(default)s)")
+        bt.add_argument("--jobs", type=int, default=DEFAULT_JOBS, help="processes for tuning (default: %(default)s)")
         bt.add_argument("--compare", action="store_true", help="also compare every feature preset")
         bt.add_argument("--refit-days", type=int, default=7)
         bt.add_argument("--ev-threshold", type=float, default=0.05)

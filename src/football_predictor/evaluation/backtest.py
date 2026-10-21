@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -300,24 +301,35 @@ def tune_hyperparameters(
     refit_days: int = 14,
     criterion: str = "brier_model",
     divisions: Iterable[str] | None = None,
+    n_jobs: int = 1,
 ) -> pd.DataFrame:
     """Out-of-sample score of every combination in ``grid`` on a validation window.
 
     Use a window that precedes the test set so the choice cannot leak test
-    information. Rows are sorted best first by ``criterion``.
+    information; a window of two seasons is far more stable than one, because
+    the ranking of settings changes a lot from season to season. Rows are
+    sorted best first by ``criterion``. Combinations run in ``n_jobs``
+    processes.
     """
     model_kwargs = model_kwargs or {}
     names = list(grid)
-    rows = []
-    for values in itertools.product(*(grid[name] for name in names)):
-        params = dict(zip(names, values))
-        factory = partial(DixonColesModel, **{**model_kwargs, **params})
-        predictions = walk_forward_predictions(
-            data, factory, start, end, refit_days=refit_days, divisions=divisions
-        )
-        rows.append({**params, **evaluate_forecasts(predictions, n_resamples=0)})
-        log.info("%s -> %s=%.5f", params, criterion, rows[-1][criterion])
+    combinations = [dict(zip(names, values)) for values in itertools.product(*(grid[name] for name in names))]
+    score = partial(_score_combination, data=data, model_kwargs=model_kwargs, start=start, end=end,
+                    refit_days=refit_days, divisions=list(divisions) if divisions is not None else None)
+    if n_jobs > 1 and len(combinations) > 1:
+        with ProcessPoolExecutor(max_workers=min(n_jobs, len(combinations))) as pool:
+            rows = list(pool.map(score, combinations))
+    else:
+        rows = [score(params) for params in combinations]
+    for row in rows:
+        log.info("%s -> %s=%.5f", {k: row[k] for k in names}, criterion, row[criterion])
     return pd.DataFrame(rows).sort_values(criterion).reset_index(drop=True)
+
+
+def _score_combination(params: dict, *, data, model_kwargs, start, end, refit_days, divisions) -> dict:
+    factory = partial(DixonColesModel, **{**model_kwargs, **params})
+    predictions = walk_forward_predictions(data, factory, start, end, refit_days=refit_days, divisions=divisions)
+    return {**params, **evaluate_forecasts(predictions, n_resamples=0)}
 
 
 def tune_xi(

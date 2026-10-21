@@ -87,3 +87,19 @@ def test_default_test_season_skips_an_unfinished_season():
     assert default_test_season(data, "E0") == 2024
     assert default_test_season(data.dropna(), "E0") == 2025
     assert default_test_season(data, "E1") == 2026  # nothing complete yet: latest season
+
+
+def test_training_divisions_default_to_the_predicted_division(tmp_path, capsys, offline):
+    from argparse import Namespace
+
+    main(["--data-dir", str(tmp_path), "ingest", "--seasons", "2023", "--sources", "football_data"])
+    capsys.readouterr()
+
+    def divisions(train):
+        args = Namespace(synthetic=False, db=tmp_path / "football.db", division="E0", train_divisions=train)
+        matches, _, _ = cli.load_inputs(args)
+        return set(matches["division"])
+
+    assert divisions(None) == {"E0"}
+    assert divisions(["all"]) == {"E0", "E1"}
+    assert divisions(["E1"]) == {"E0", "E1"}  # the predicted division is always kept
