@@ -42,6 +42,19 @@ TOTALS_COLUMNS = {
 }
 TOTALS_FIELDS = ["season", "home_team", "away_team", "bookmaker", "market_time", "line", "over", "under"]
 
+# Asian handicap: bookmaker -> market time -> (line, home, away) columns. The
+# line is the home side's handicap (-0.5: home gives half a goal). Opening and
+# closing have their own lines; before 2019/20 only Betbrain opening prices.
+HANDICAP_COLUMNS = {
+    "pinnacle": {"closing": ("AHCh", "PCAHH", "PCAHA"), "opening": ("AHh", "PAHH", "PAHA")},
+    "average": {"closing": ("AHCh", "AvgCAHH", "AvgCAHA"), "opening": ("AHh", "AvgAHH", "AvgAHA")},
+    "average_legacy": {"opening": ("BbAHh", "BbAvAHH", "BbAvAHA")},
+    "bet365": {"closing": ("AHCh", "B365CAHH", "B365CAHA"), "opening": ("AHh", "B365AHH", "B365AHA")},
+    "max": {"closing": ("AHCh", "MaxCAHH", "MaxCAHA"), "opening": ("AHh", "MaxAHH", "MaxAHA")},
+    "max_legacy": {"opening": ("BbAHh", "BbMxAHH", "BbMxAHA")},
+}
+HANDICAP_FIELDS = ["season", "home_team", "away_team", "bookmaker", "market_time", "line", "home", "away"]
+
 STAT_COLUMNS = {
     "HS": "home_shots",
     "AS": "away_shots",
@@ -114,6 +127,42 @@ def _totals_long(raw: pd.DataFrame, matches: pd.DataFrame) -> pd.DataFrame:
     totals = pd.concat(frames, ignore_index=True)
     keys = ["season", "home_team", "away_team", "bookmaker", "market_time", "line"]
     return totals.drop_duplicates(keys).reset_index(drop=True)
+
+
+def _handicaps_long(raw: pd.DataFrame, matches: pd.DataFrame) -> pd.DataFrame:
+    frames = []
+    for bookmaker, markets in HANDICAP_COLUMNS.items():
+        for market_time, columns in markets.items():
+            if not all(c in raw for c in columns):
+                continue
+            block = raw[list(columns)].apply(pd.to_numeric, errors="coerce")
+            block.columns = ["line", "home", "away"]
+            block.insert(0, "market_time", market_time)
+            block.insert(0, "bookmaker", bookmaker.removesuffix("_legacy"))
+            block.insert(0, "away_team", matches["away_team"].to_numpy())
+            block.insert(0, "home_team", matches["home_team"].to_numpy())
+            block.insert(0, "season", matches["season"].to_numpy())
+            frames.append(block.dropna(subset=["line", "home", "away"]))
+    if not frames:
+        return pd.DataFrame(columns=HANDICAP_FIELDS)
+    handicaps = pd.concat(frames, ignore_index=True)
+    keys = ["season", "home_team", "away_team", "bookmaker", "market_time"]
+    return handicaps.drop_duplicates(keys).reset_index(drop=True)
+
+
+def parse_season_handicaps(csv_text: str, season: int, division: str = "E0") -> pd.DataFrame:
+    """Asian handicap lines and prices of one season file, long format."""
+    matches, _ = parse_season(csv_text, season, division)
+    return _handicaps_long(_read_csv(csv_text).reset_index(drop=True), matches)
+
+
+def parse_fixtures_handicaps(csv_text: str, divisions=("E0", "E1")) -> pd.DataFrame:
+    """Current Asian handicap lines and prices for the coming week's fixtures."""
+    raw = _read_csv(csv_text)
+    raw = raw[raw["Div"].astype(str).str.strip().isin(divisions)].reset_index(drop=True)
+    matches, _ = parse_fixtures(csv_text, divisions)
+    handicaps = _handicaps_long(raw, matches)
+    return handicaps[handicaps["market_time"] == "opening"].reset_index(drop=True)
 
 
 def parse_season_totals(csv_text: str, season: int, division: str = "E0") -> pd.DataFrame:

@@ -270,3 +270,18 @@ def test_dataset_carries_opening_and_best_prices():
     assert (played["open_home"] != played["odds_home"]).any()  # opening differs from closing
     assert "max_home" in data and "max_over_2_5" in data  # the toy files carry no Max columns, so NaN
     assert played["max_home"].isna().all()
+
+
+def test_dataset_carries_handicap_lines_and_prices():
+    db = Database(":memory:")
+    pipeline = Pipeline(db, fake.FakeClient(), current_season=fake.SEASON)
+    assert pipeline.run([fake.SEASON], ["football_data"], upcoming=True) == []
+    data = db.load_match_dataset()
+    played = data[data["home_goals"].notna() & (data["division"] == "E0")]
+    assert played["ah_line"].notna().all() and (played["handicap_bookmaker"] == "pinnacle").all()
+    assert played["odds_ah_home"].notna().all() and played["max_ah_home"].notna().all()
+    assert set(played["ah_line"]) == {-0.25, 0.0, -0.5, 0.75} and (played["open_ah_line"] == played["ah_line"]).all()
+    upcoming = data[data["home_goals"].isna() & (data["division"] == "E0")]
+    assert set(upcoming["open_ah_line"].dropna()) == {0.25, 1.5}
+    prices = db.load_prices(upcoming["match_id"])
+    assert set(prices["handicap"]["bookmaker"]) == {"bet365", "pinnacle"} and len(prices["1x2"]) == 6

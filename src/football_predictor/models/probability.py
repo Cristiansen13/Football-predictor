@@ -56,6 +56,59 @@ def outcome_probabilities(matrices: np.ndarray) -> np.ndarray:
     return np.column_stack([p_home, p_draw, p_away])
 
 
+def _is_quarter(line: np.ndarray) -> np.ndarray:
+    return np.abs(np.round(line * 4) - line * 4) < 1e-9 & (np.round(line * 4).astype(int) % 2 != 0)
+
+
+def handicap_outcomes(matrices: np.ndarray, line) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """P(home covers), P(push), P(away covers) for a home handicap ``line`` in half-goal steps.
+
+    ``line`` is what the home side receives: -0.5 means it must win, +1 means
+    it may lose by one and still push. Quarter lines are not accepted here;
+    see :func:`handicap_effective_probabilities`.
+    """
+    matrices = np.asarray(matrices)
+    if matrices.ndim == 2:
+        matrices = matrices[None]
+    line = np.broadcast_to(np.asarray(line, dtype=float), (matrices.shape[0],))
+    goals = np.arange(matrices.shape[1])
+    diff = goals[:, None] - goals[None, :]  # home minus away
+    margin = diff[None, :, :] + line[:, None, None]
+    home = (matrices * (margin > 1e-9)).sum(axis=(1, 2))
+    push = (matrices * (np.abs(margin) <= 1e-9)).sum(axis=(1, 2))
+    away = (matrices * (margin < -1e-9)).sum(axis=(1, 2))
+    return home, push, away
+
+
+def handicap_effective_probabilities(matrices: np.ndarray, line, odds_home, odds_away) -> tuple[np.ndarray, np.ndarray]:
+    """Win probabilities that make ``p × odds − 1`` the true expected value of a handicap bet.
+
+    A push returns the stake, worth ``1/odds`` of a win, so the effective
+    probability is ``P(cover) + P(push) / odds``. A quarter line (-0.25, 0.75,
+    ...) splits the stake over the two neighbouring half-goal lines, so its
+    effective probability is their average.
+    """
+    matrices = np.asarray(matrices)
+    if matrices.ndim == 2:
+        matrices = matrices[None]
+    n = matrices.shape[0]
+    line = np.broadcast_to(np.asarray(line, dtype=float), (n,)).copy()
+    odds_home = np.broadcast_to(np.asarray(odds_home, dtype=float), (n,))
+    odds_away = np.broadcast_to(np.asarray(odds_away, dtype=float), (n,))
+    quarter = np.abs(np.round(line * 4) - line * 4) < 1e-9
+    quarter &= (np.round(line * 4).astype(int) % 2) != 0
+    p_home = np.zeros(n)
+    p_away = np.zeros(n)
+    for offset, weight in ((-0.25, 0.5), (0.25, 0.5)):
+        shifted = np.where(quarter, line + offset, line)
+        home, push, away = handicap_outcomes(matrices, shifted)
+        part_home = home + push / odds_home
+        part_away = away + push / odds_away
+        p_home += np.where(quarter, weight * part_home, 0.5 * part_home)
+        p_away += np.where(quarter, weight * part_away, 0.5 * part_away)
+    return p_home, p_away
+
+
 def market_probabilities(matrices: np.ndarray) -> pd.DataFrame:
     """1X2, over/under 2.5 goals and both-teams-to-score probabilities."""
     matrices = np.asarray(matrices)

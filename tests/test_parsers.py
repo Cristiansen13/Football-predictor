@@ -153,3 +153,15 @@ def test_football_data_over_under_prices():
     upcoming = football_data.parse_fixtures_totals(fake.fixtures_csv())
     assert len(upcoming) == 2 and set(upcoming["bookmaker"]) == {"average"}  # Scottish row dropped
     assert (upcoming["market_time"] == "opening").all() and upcoming.iloc[0]["over"] == 2.05
+
+
+def test_football_data_asian_handicap_prices():
+    handicaps = football_data.parse_season_handicaps(fake.football_data_csv(), 2023)
+    assert set(handicaps["bookmaker"]) == {"bet365", "pinnacle", "max"}
+    assert set(handicaps["market_time"]) == {"opening", "closing"}
+    pinnacle_closing = handicaps[(handicaps["bookmaker"] == "pinnacle") & (handicaps["market_time"] == "closing")]
+    assert len(pinnacle_closing) == 10 and set(pinnacle_closing["line"]) == {-0.25, 0.0, -0.5, 0.75}
+    assert pinnacle_closing.iloc[0][["home", "away"]].tolist() == [1.96, 1.94]
+    upcoming = football_data.parse_fixtures_handicaps(fake.fixtures_csv())
+    assert len(upcoming) == 4 and set(upcoming["bookmaker"]) == {"bet365", "pinnacle"}  # two E0 fixtures, two books
+    assert set(upcoming["line"]) == {0.25, 1.5} and (upcoming["market_time"] == "opening").all()

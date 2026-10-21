@@ -305,3 +305,38 @@ def test_walk_forward_reports_anchored_forecast_and_score_hits(league):
     assert abs(metrics["brier_anchored"] - metrics["brier_market"]) < 0.01  # anchored on the same prices
     assert 0.0 < metrics["score_hit_model"] < 0.3 and 0.0 < metrics["score_hit_anchored"] < 0.3
     assert metrics["score_log_loss_anchored"] > 0 and metrics["accuracy_anchored"] > 0.3
+
+
+def test_handicap_bets_settle_pushes_and_quarter_lines():
+    from football_predictor.evaluation.backtest import BettingStrategy, simulate_betting
+
+    frame = _priced_predictions()
+    frame["exp_home_goals"], frame["exp_away_goals"] = 1.7, 1.1
+    frame["rho"], frame["max_goals"] = -0.05, 6
+    frame["home_goals"] = [1, 0, 1, 2, 0, 3]
+    frame["away_goals"] = [0, 2, 1, 0, 0, 1]
+    frame["ah_line"] = [-1.0, 0.25, 0.0, -0.75, -0.25, -1.5]
+    frame["odds_ah_home"] = [1.95, 2.0, 1.9, 1.98, 1.93, 2.02]
+    frame["odds_ah_away"] = [1.95, 1.9, 2.0, 1.92, 1.97, 1.88]
+    frame["max_ah_home"] = [2.4, 2.05, 1.95, 2.3, 2.3, 2.3]  # generous home prices: the model backs the home side
+    frame["max_ah_away"] = [1.9, 1.9, 1.95, 1.9, 1.95, 1.85]
+    frame["max_ah_line"] = frame["ah_line"]
+    bets, _ = simulate_betting(frame, BettingStrategy(ev_threshold=0.0, markets=("handicap",), price="max"))
+    assert len(bets) > 0 and (bets["market"] == "handicap").all() and bets["line"].notna().all()
+    from football_predictor.evaluation.betting import handicap_profit
+
+    # Every bet settles as the handicap rules say for the side actually chosen.
+    settled = bets.merge(frame[["match_id", "home_goals", "away_goals"]], on="match_id")
+    side = np.where(settled["selection"] == "ah_home", 1, -1)
+    expected = handicap_profit(settled["home_goals"], settled["away_goals"], settled["line"], settled["odds"], side)
+    assert np.allclose(settled["units"], expected)
+    assert (settled["won"] == (settled["units"] > 0)).all()
+    pushes = settled[settled["match_id"] == "m0"]  # either side of -1 at 1-0 is a push: stake back, not a win
+    assert len(pushes) == 0 or (pushes["units"] == 0).all() and not pushes["won"].any()
+    halves = settled[settled["match_id"] == "m4"]  # -0.25 at 0-0: half the stake decided either way
+    assert len(halves) == 0 or np.allclose(np.abs(halves["units"]) % 0.5, 0) and (halves["units"] != 0).all()
+    assert np.allclose(bets["profit"], bets["stake"] * bets["units"])
+    # The anchored grid prices handicaps too.
+    frame["anchored_exp_home_goals"], frame["anchored_exp_away_goals"] = 1.6, 1.2
+    anchored_bets, _ = simulate_betting(frame, BettingStrategy(ev_threshold=-1.0, fair="anchored", markets=("handicap",)))
+    assert len(anchored_bets) == 6 and anchored_bets["p_model"].between(0, 1).all()

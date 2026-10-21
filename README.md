@@ -50,6 +50,7 @@ Each target is a thin wrapper around the CLI:
 | `football-predictor status [--audit N]` | data coverage report, quality issues, point-in-time audit of N matches |
 | `football-predictor ratings [--as-of DATE]` | team attack/defence ratings |
 | `football-predictor predict HOME AWAY` / `--upcoming DAYS` | model and market-anchored forecasts: score grids, markets, best-EV bet and stake |
+| `football-predictor scan [--upcoming DAYS] [--fair anchored\|model] [--ev-threshold X]` | value board: every bookmaker's price on the coming fixtures (1X2, over/under, Asian handicap) against the fair value, with EV and Kelly stake |
 | `football-predictor backtest [--test-season Y \| --test-seasons A-B] [--tune] [--compare] [--markets 1x2 totals] [--fair model\|market\|blend] [--price closing\|opening\|max]` | walk-forward evaluation and betting simulation, 1X2 and over/under 2.5 |
 
 Reports go to `data/reports/` (`metrics_<season>.json`, predictions, bets,
@@ -59,7 +60,7 @@ calibration table, PnL curve and reliability diagram). Use `--data-dir` to move 
 
 | Source | Module | Method | Loaded into |
 | :--- | :--- | :--- | :--- |
-| Football-Data.co.uk | `etl/football_data.py` | direct CSV, Premier League (`E0`) and Championship (`E1`), plus the weekly `fixtures.csv` | `matches`, `odds` (1X2, opening/closing per bookmaker), `totals_odds` (over/under 2.5), shot counts |
+| Football-Data.co.uk | `etl/football_data.py` | direct CSV, Premier League (`E0`) and Championship (`E1`), plus the weekly `fixtures.csv` | `matches`, `odds` (1X2, opening/closing per bookmaker), `totals_odds` (over/under 2.5), `handicap_odds` (Asian handicap line and prices), shot counts |
 | Understat | `etl/understat.py` | regex over `JSON.parse('\x..')` script tags; falls back to its JSON endpoint | `advanced_stats` (xG, npxG, PPDA, deep completions; xA from match rosters), `lineups` |
 | ESPN | `etl/espn.py` | public JSON endpoints of ESPN's own site (no key, not a documented API) | `match_stats` (possession, shots), `team_schedule` (league, cups, Europe) |
 | FBref | `etl/fbref.py` | BeautifulSoup over `data-stat` cells, including tables hidden in HTML comments | `matches`, `match_stats` (possession, shots), `team_schedule` (all competitions) |
@@ -186,9 +187,13 @@ the Premier League. Metrics:
   carries no BTTS prices).
 * **Betting:** highest-EV selection per match across the markets in
   `--markets` (home/draw/away at the 1X2 prices, over/under at the totals
-  prices) when `EV = P_model × odds − 1 > threshold`, fractional Kelly stakes
-  on the start-of-day bankroll with per-bet and per-day caps. Reported: ROI,
-  drawdown, bets and ROI by market and by selection, and flat-stake ROI with a
+  prices, both sides of the Asian handicap at its prices) when
+  `EV = P × odds − 1 > threshold`, fractional Kelly stakes on the start-of-day
+  bankroll with per-bet and per-day caps. Handicaps settle properly: a push
+  returns the stake, a quarter line puts half the stake on each neighbouring
+  half-goal line, and the probability used for EV counts a push as `1/odds`
+  of a win (`handicap_effective_probabilities`). Reported: ROI, drawdown,
+  bets and ROI by market and by selection, and flat-stake ROI with a
   bootstrap interval and `p_flat_roi_le_zero`.
 * **Odds used:** the reference price is Pinnacle closing, then market-average
   closing, then Bet365 closing, then pre-match prices, for both markets; it is
@@ -198,9 +203,11 @@ the Premier League. Metrics:
   proportional scaling leaves longshots with too much probability, which made
   them look like value when they were not.
 * **Fair value and price** (`--fair`, `--price`): the EV can be judged with the
-  model, with the de-margined closing line (the sharp price as fair value), or
-  a blend, and the bet struck at the closing reference, the earliest listed
-  price, or the best price across bookmakers (`max`). Every bet records its
+  model, with the de-margined closing line (the sharp price as fair value),
+  with the market-anchored grid (`anchored`: the sharp line's own scoring
+  rates, so 1X2, totals and handicaps are all priced from one consistent
+  distribution), or a blend, and the bet struck at the closing reference, the
+  earliest listed price, or the best price across bookmakers (`max`). Every bet records its
   closing-line value, `p_closing × odds − 1`: the return the closing line
   expects for it. Average CLV is the yardstick that separates an edge from a
   lucky run; `--fair market --price max` is the pure price-shopping benchmark
@@ -338,6 +345,33 @@ opening and closing prices:
   closing-line value (−2% to −4%) even at the opening price, which is days
   before anyone could act on a team sheet. The information is real and
   already priced. No timed line-up strategy was built.
+* **The optimal bet: which market, which price, how much.** With Asian
+  handicaps added (`handicap_odds`, Pinnacle margin 2.1%, half the lines are
+  quarter lines) the engine scans 1X2, over/under 2.5 and both handicap
+  sides, takes the best price across bookmakers and stakes a quarter Kelly
+  capped at 5% of the bankroll per bet. Seven seasons, 2019/20–2025/26,
+  EV threshold 2% (`make backtest-market`):
+
+  | Fair value for the EV | Bets | Flat-stake ROI | 95% interval | Mean CLV | Kelly bankroll 1,000 → | Max drawdown |
+  | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+  | Each market's sharp closing price (`--fair market`) | 1,909 | +5.7% | −1.1% to +12.9% | +5.5% | 1,962 | 35% |
+  | Market-anchored grid (`--fair anchored`) | 2,294 | +2.1% | −4.3% to +8.8% | +3.8% | 1,086 | 49% |
+  | Model (`--fair model`, EV 5%) | 2,552 | +1.7% | −6.0% to +9.0% | +0.3% | 122 | 96% |
+
+  By market with the sharp price as fair: 1X2 +5.8% on 1,159 bets, over/under
+  +9.2% on 389, handicap +1.7% on 361 (closing-line value +5.2%). The
+  market-anchored grid, the best *forecast* of winner and score, is a worse
+  judge of *value*: one score distribution cannot reproduce three markets'
+  prices exactly, and the compromise shows up as false value, most of all on
+  handicaps (−4.5% on 442 bets). The model as fair value finds no value at
+  all, and Kelly staking on its overconfident probabilities loses 88% of the
+  bankroll. So the answer to "which bet, when and how" is: judge each market
+  by its own sharp closing price, bet whichever bookmaker beats it by at least
+  2% at closing time, stake a quarter Kelly, and expect about 4–6% per bet
+  before account limits. The caveats above still apply, and 2025/26 was
+  negative in every configuration (−21% on 84 bets), in line with the
+  shrinking discrepancies. `football-predictor scan` is the live version of
+  this board for the coming fixtures, once Football-Data lists their prices.
 * **De-margining matters for this.** With proportional de-margining the same
   strategy looked like +5.5% CLV and returned 0%: proportional scaling gives
   longshots too much probability, so they looked like value. The power (or

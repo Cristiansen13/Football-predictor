@@ -252,3 +252,34 @@ def test_model_predict_anchored_tracks_the_market(league):
     fallback = model.predict_anchored(unpriced)
     assert (fallback["source"] == "model").all()
     pd.testing.assert_frame_equal(fallback.drop(columns="source"), plain)
+
+
+def test_handicap_probabilities_and_settlement():
+    from football_predictor.evaluation.betting import handicap_profit
+    from football_predictor.models.probability import handicap_effective_probabilities, handicap_outcomes
+
+    grid = score_matrices(1.6, 1.1, rho=-0.05, max_goals=6)
+    outcomes = outcome_probabilities(grid)[0]
+    # Level handicap: home covers when it wins, a draw is a push.
+    home, push, away = handicap_outcomes(grid, 0.0)
+    assert home[0] == pytest.approx(outcomes[0]) and push[0] == pytest.approx(outcomes[1])
+    assert away[0] == pytest.approx(outcomes[2])
+    # Half-goal lines never push; +1 lets the home side lose by one and push.
+    home, push, away = handicap_outcomes(grid, -0.5)
+    assert push[0] == 0.0 and home[0] == pytest.approx(outcomes[0])
+    home, push, away = handicap_outcomes(grid, 1.0)
+    assert push[0] == pytest.approx(grid[0][np.arange(6), np.arange(1, 7)].sum())  # home one goal short
+    # Effective probabilities: a push is worth 1/odds of a win; quarter lines average the neighbours.
+    p_home, p_away = handicap_effective_probabilities(grid, 0.0, 1.9, 2.0)
+    assert p_home[0] == pytest.approx(outcomes[0] + outcomes[1] / 1.9)
+    q_home, _ = handicap_effective_probabilities(grid, -0.25, 1.9, 2.0)
+    h0, _ = handicap_effective_probabilities(grid, 0.0, 1.9, 2.0)
+    h5, _ = handicap_effective_probabilities(grid, -0.5, 1.9, 2.0)
+    assert q_home[0] == pytest.approx(0.5 * (h0[0] + h5[0]))
+    # Settlement at 1-0: home -0.25 wins both halves, home -1 pushes, home -1.25 half-loses, away +1.25 half-wins.
+    assert handicap_profit(1, 0, -0.25, 2.0, 1) == pytest.approx(1.0)
+    assert handicap_profit(1, 0, -1.0, 2.0, 1) == pytest.approx(0.0)
+    assert handicap_profit(1, 0, -1.25, 2.0, 1) == pytest.approx(-0.5)
+    assert handicap_profit(1, 0, -1.25, 2.0, -1) == pytest.approx(0.5)
+    assert handicap_profit(0, 0, -0.25, 2.0, 1) == pytest.approx(-0.5)  # half pushes, half loses
+    assert handicap_profit([2, 0], [0, 3], [-1.5, -1.5], [1.8, 1.8], [1, -1]).tolist() == pytest.approx([0.8, 0.8])

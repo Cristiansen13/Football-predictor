@@ -13,7 +13,7 @@ from .backtest import (
     tune_xi,
     walk_forward_predictions,
 )
-from .betting import expected_value, kelly_fraction
+from .betting import expected_value, handicap_profit, kelly_fraction
 from .metrics import (
     accuracy,
     bootstrap_interval,

@@ -324,6 +324,74 @@ def cmd_predict(args: argparse.Namespace) -> None:
             print((grid * 100).round(1).to_string())
 
 
+def cmd_scan(args: argparse.Namespace) -> None:
+    """Value board: every bookmaker's price on the coming fixtures against a fair value."""
+    from .evaluation.metrics import implied_probabilities
+    from .models import score_matrices
+    from .models.probability import handicap_effective_probabilities
+
+    data, fixtures = _fixture_rows(args)
+    model = model_factory(args)().fit(data, as_of=fixtures["kickoff"].min())
+    forecast = model.predict_anchored(fixtures) if args.fair == "anchored" else model.predict(fixtures)
+    lam, mu = forecast["exp_home_goals"].to_numpy(dtype=float), forecast["exp_away_goals"].to_numpy(dtype=float)
+    grids = score_matrices(lam, mu, model.rho_, model.max_goals)
+    db = Database(args.db)
+    prices = db.load_prices(fixtures["match_id"])
+    db.close()
+    teams = fixtures.set_index("match_id")[["kickoff", "home_team", "away_team"]]
+    index = {m: i for i, m in enumerate(fixtures["match_id"])}
+    rows = []
+
+    def add(match_id, market, selection, line, bookmaker, when, odds, fair):
+        if not np.isfinite(odds) or odds <= 1.0 or not np.isfinite(fair):
+            return
+        ev = fair * odds - 1.0
+        rows.append({"kickoff": teams.loc[match_id, "kickoff"], "match": f"{teams.loc[match_id, 'home_team']} v "
+                     f"{teams.loc[match_id, 'away_team']}", "market": market, "selection": selection, "line": line,
+                     "bookmaker": bookmaker, "prices": when, "odds": odds, "fair_prob": fair, "ev": ev,
+                     "stake_pct": 100 * args.kelly * max(kelly_fraction(fair, odds), 0.0)})
+
+    for row in prices["1x2"].itertuples(index=False):
+        i = index.get(row.match_id)
+        if i is None or row.bookmaker == "max" and not args.include_max:
+            continue
+        for selection, odds in (("home", row.home), ("draw", row.draw), ("away", row.away)):
+            add(row.match_id, "1x2", selection, np.nan, row.bookmaker, row.market_time, odds,
+                float(forecast[f"p_{selection}"].iloc[i]))
+    for row in prices["totals"].itertuples(index=False):
+        i = index.get(row.match_id)
+        if i is None or row.bookmaker == "max" and not args.include_max:
+            continue
+        add(row.match_id, "totals", "over", 2.5, row.bookmaker, row.market_time, row.over, float(forecast["p_over_2_5"].iloc[i]))
+        add(row.match_id, "totals", "under", 2.5, row.bookmaker, row.market_time, row.under, float(forecast["p_under_2_5"].iloc[i]))
+    for row in prices["handicap"].itertuples(index=False):
+        i = index.get(row.match_id)
+        if i is None or row.bookmaker == "max" and not args.include_max:
+            continue
+        home, away = handicap_effective_probabilities(grids[i], row.line, row.home, row.away)
+        add(row.match_id, "handicap", "ah_home", row.line, row.bookmaker, row.market_time, row.home, float(home[0]))
+        add(row.match_id, "handicap", "ah_away", row.line, row.bookmaker, row.market_time, row.away, float(away[0]))
+    if not rows:
+        listed = "\n".join(f"  {k:%a %d %b %H:%M}  {h} v {a}" for k, h, a in
+                           fixtures[["kickoff", "home_team", "away_team"]].itertuples(index=False))
+        raise SystemExit(
+            f"No prices stored for the {len(fixtures)} fixture(s) in the next {args.upcoming} days:\n{listed}\n"
+            "Football-Data publishes the week's prices in fixtures.csv a few days before kickoff; run "
+            "`football-predictor ingest` once it lists them (the current fixtures.csv covers other divisions only)."
+        )
+    board = pd.DataFrame(rows).sort_values("ev", ascending=False)
+    board["kickoff"] = pd.to_datetime(board["kickoff"]).dt.strftime("%Y-%m-%d %H:%M")
+    source = forecast["source"].value_counts().to_dict() if "source" in forecast else {"model": len(forecast)}
+    print(f"Fair value: {args.fair} ({source}); {len(board)} prices on {len(fixtures)} fixtures; "
+          f"showing EV > {args.ev_threshold:+.2f}")
+    shown = board[board["ev"] > args.ev_threshold]
+    if shown.empty:
+        print("No price beats the fair value by that margin.")
+        print(board.head(10).round(3).to_string(index=False))
+    else:
+        print(shown.round(3).to_string(index=False))
+
+
 METRIC_SECTIONS = {
     "Forecast quality": ["matches", "brier_model", "rps_model", "log_loss_model", "score_log_loss_model",
                          "score_hit_model", "accuracy_model", "ece_model", "brier_base_rate",
@@ -342,8 +410,10 @@ METRIC_SECTIONS = {
                 "hit_rate", "mean_odds", "mean_ev", "flat_stake_profit_units", "flat_stake_roi",
                 "flat_roi_ci_low", "flat_roi_ci_high", "p_flat_roi_le_zero", "mean_clv",
                 "bets_1x2", "flat_stake_roi_1x2", "clv_1x2", "bets_totals", "flat_stake_roi_totals", "clv_totals",
+                "bets_handicap", "flat_stake_roi_handicap", "clv_handicap",
                 "bets_home", "roi_home", "bets_draw", "roi_draw", "bets_away", "roi_away",
-                "bets_over", "roi_over", "bets_under", "roi_under"],
+                "bets_over", "roi_over", "bets_under", "roi_under", "bets_ah_home", "roi_ah_home",
+                "bets_ah_away", "roi_ah_away"],
 }
 
 
@@ -356,7 +426,7 @@ def season_breakdown(result: BacktestResult) -> pd.DataFrame:
     for season, predictions in result.predictions.groupby("season"):
         m = evaluate_forecasts(predictions, n_resamples=0)
         picked = bets[bets["season"] == season] if not bets.empty else bets
-        flat = np.where(picked["won"], picked["odds"] - 1.0, -1.0).astype(float) if len(picked) else np.array([])
+        flat = picked["units"].to_numpy(dtype=float) if len(picked) else np.array([])
         rows.append(
             {
                 "season": int(season),
@@ -567,6 +637,17 @@ def build_parser() -> argparse.ArgumentParser:
     predict.add_argument("--kelly", type=float, default=0.25, help="fraction of full Kelly for stake_pct")
     predict.set_defaults(func=cmd_predict)
 
+    scan = sub.add_parser("scan", help="value board: every bookmaker's price on coming fixtures vs a fair value")
+    model_options(scan)
+    scan.add_argument("--upcoming", type=int, default=7, metavar="DAYS", help="fixtures in the next DAYS days")
+    scan.add_argument("--as-of", default=None, help="fit date (default: now)")
+    scan.add_argument("--fair", choices=["anchored", "model"], default="anchored",
+                      help="fair value: the market-anchored grid (default) or the model alone")
+    scan.add_argument("--ev-threshold", type=float, default=0.0, help="show prices with EV above this")
+    scan.add_argument("--kelly", type=float, default=0.25, help="fraction of full Kelly for stake_pct")
+    scan.add_argument("--include-max", action="store_true", help="also list the best-of-market price")
+    scan.set_defaults(func=cmd_scan, home=None, away=None)
+
     for name, help_text in (("backtest", "walk-forward backtest with EV betting"),
                             ("demo", "backtest on a simulated league (no network needed)")):
         bt = sub.add_parser(name, help=help_text)
@@ -575,11 +656,12 @@ def build_parser() -> argparse.ArgumentParser:
         bt.add_argument("--test-seasons", default=None, metavar="RANGE",
                         help="e.g. 2021-2025: one walk-forward across several seasons, reported overall "
                              "and per season (far more matches than one season can offer)")
-        bt.add_argument("--markets", nargs="+", choices=["1x2", "totals"], default=["1x2", "totals"],
-                        help="markets the EV search may bet (default: both)")
-        bt.add_argument("--fair", choices=["model", "market", "blend"], default="model",
+        bt.add_argument("--markets", nargs="+", choices=["1x2", "totals", "handicap"],
+                        default=["1x2", "totals", "handicap"], help="markets the EV search may bet (default: all)")
+        bt.add_argument("--fair", choices=["model", "market", "anchored", "blend"], default="model",
                         help="probability the EV is judged with: the model, the de-margined closing line "
-                             "(sharp price as fair value), or a blend (default: model)")
+                             "(sharp price as fair value), the market-anchored grid (the sharp line's own rates, "
+                             "pricing every market consistently), or a model/market blend (default: model)")
         bt.add_argument("--blend-weight", type=float, default=0.5, help="weight on the market in --fair blend")
         bt.add_argument("--anchor-price", choices=["closing", "opening"], default="closing",
                         help="prices the market-anchored forecast is built from (default: closing)")

@@ -15,8 +15,8 @@ import numpy as np
 import pandas as pd
 
 from ..models.dixon_coles import DixonColesModel
-from ..models.probability import score_matrices
-from .betting import expected_value, kelly_fraction
+from ..models.probability import handicap_effective_probabilities, score_matrices
+from .betting import expected_value, handicap_profit, kelly_fraction
 from .metrics import (
     accuracy,
     binary_brier,
@@ -38,18 +38,22 @@ from .metrics import (
 
 log = logging.getLogger(__name__)
 
-SELECTIONS = np.array(["home", "draw", "away", "over", "under"])
+SELECTIONS = np.array(["home", "draw", "away", "over", "under", "ah_home", "ah_away"])
 PROB_COLUMNS = ["p_home", "p_draw", "p_away"]
 ODDS_COLUMNS = ["odds_home", "odds_draw", "odds_away"]
 TOTALS_PROB_COLUMNS = ["p_over_2_5", "p_under_2_5"]
 TOTALS_ODDS_COLUMNS = ["odds_over_2_5", "odds_under_2_5"]
-MARKETS = {"1x2": (0, 1, 2), "totals": (3, 4)}
+HANDICAP_ODDS_COLUMNS = ["odds_ah_home", "odds_ah_away"]
+MARKETS = {"1x2": (0, 1, 2), "totals": (3, 4), "handicap": (5, 6)}
 # Prices a bet can be struck at: the closing reference, the earliest listed price,
-# or the best price across bookmakers at closing.
+# or the best price across bookmakers at closing. Handicaps carry their line.
 PRICE_COLUMNS = {
-    "closing": (ODDS_COLUMNS, TOTALS_ODDS_COLUMNS),
-    "opening": (["open_home", "open_draw", "open_away"], ["open_over_2_5", "open_under_2_5"]),
-    "max": (["max_home", "max_draw", "max_away"], ["max_over_2_5", "max_under_2_5"]),
+    "closing": {"1x2": ODDS_COLUMNS, "totals": TOTALS_ODDS_COLUMNS,
+                "handicap": HANDICAP_ODDS_COLUMNS, "handicap_line": "ah_line"},
+    "opening": {"1x2": ["open_home", "open_draw", "open_away"], "totals": ["open_over_2_5", "open_under_2_5"],
+                "handicap": ["open_ah_home", "open_ah_away"], "handicap_line": "open_ah_line"},
+    "max": {"1x2": ["max_home", "max_draw", "max_away"], "totals": ["max_over_2_5", "max_under_2_5"],
+            "handicap": ["max_ah_home", "max_ah_away"], "handicap_line": "max_ah_line"},
 }
 # Market probabilities are de-margined with the power method: the proportional
 # method hands longshots too much probability and makes them look like value.
@@ -64,9 +68,10 @@ class BettingStrategy:
     max_daily_exposure: float = 0.5
     min_odds: float = 1.01
     max_odds: float = 15.0
-    markets: tuple[str, ...] = ("1x2", "totals")
+    markets: tuple[str, ...] = ("1x2", "totals", "handicap")
     # Probability the EV is judged with: the model, the de-margined closing reference
-    # price (the sharp line as fair value), or a blend of the two.
+    # price (the sharp line as fair value), the market-anchored grid (the sharp line's
+    # own rates, so every market is priced consistently), or a model/market blend.
     fair: str = "model"
     blend_weight: float = 0.5  # weight on the market in a blend
     # Price the bet is struck and settled at (see PRICE_COLUMNS).
@@ -129,7 +134,9 @@ def walk_forward_predictions(
         model = model_factory().fit(data, as_of=block_start, warm_start=model)
         predicted = model.predict(block)
         predicted["score_loglik"] = model.log_likelihood(block)
-        three, two = PRICE_COLUMNS[anchor_price]
+        predicted["rho"] = model.rho_
+        predicted["max_goals"] = model.max_goals
+        three, two = PRICE_COLUMNS[anchor_price]["1x2"], PRICE_COLUMNS[anchor_price]["totals"]
         anchored = model.predict_anchored(block, price_columns=tuple(three), totals_columns=tuple(two))
         for column in anchored.columns:
             predicted[f"anchored_{column}"] = anchored[column].to_numpy()
@@ -293,44 +300,97 @@ def evaluate_two_way_markets(predictions: pd.DataFrame, *, n_resamples: int = 20
     return metrics
 
 
-def _price_columns(predictions: pd.DataFrame, strategy: BettingStrategy) -> tuple[list[str], list[str]]:
+def _price_columns(predictions: pd.DataFrame, strategy: BettingStrategy) -> dict:
     """Columns of the price to bet at, falling back to the closing reference when absent."""
-    three, two = PRICE_COLUMNS[strategy.price]
-    if strategy.price != "closing" and not (all(c in predictions for c in three) or all(c in predictions for c in two)):
+    columns = PRICE_COLUMNS[strategy.price]
+    present = any(all(c in predictions for c in columns[m]) for m in ("1x2", "totals", "handicap"))
+    if strategy.price != "closing" and not present:
         log.warning("no %s prices in the data; betting at the closing reference price instead", strategy.price)
         return PRICE_COLUMNS["closing"]
-    return three, two
+    return columns
+
+
+def _grids(predictions: pd.DataFrame, prefix: str) -> np.ndarray | None:
+    """Score grids rebuilt from stored rates (``exp_*`` or ``anchored_exp_*``) and ρ."""
+    lam_col, mu_col = f"{prefix}exp_home_goals", f"{prefix}exp_away_goals"
+    if not all(c in predictions for c in (lam_col, mu_col, "rho")):
+        return None
+    max_goals = int(predictions["max_goals"].iloc[0]) if "max_goals" in predictions and len(predictions) else 6
+    lam = predictions[lam_col].to_numpy(dtype=float)
+    mu = predictions[mu_col].to_numpy(dtype=float)
+    rho = float(predictions["rho"].iloc[0]) if len(predictions) else 0.0
+    grids = np.full((len(predictions), max_goals + 1, max_goals + 1), np.nan)
+    ok = np.isfinite(lam) & np.isfinite(mu)
+    if ok.any():
+        grids[ok] = score_matrices(lam[ok], mu[ok], rho, max_goals)
+    return grids
+
+
+def _handicap_fair(grids: np.ndarray | None, line: np.ndarray, odds: np.ndarray) -> np.ndarray:
+    """Effective (home, away) cover probabilities from score grids, NaN where unavailable."""
+    out = np.full((len(line), 2), np.nan)
+    if grids is None:
+        return out
+    ok = np.isfinite(line) & np.isfinite(odds).all(axis=1) & np.isfinite(grids).all(axis=(1, 2))
+    if ok.any():
+        home, away = handicap_effective_probabilities(grids[ok], line[ok], odds[ok, 0], odds[ok, 1])
+        out[ok, 0], out[ok, 1] = home, away
+    return out
 
 
 def _selection_frame(
     predictions: pd.DataFrame, strategy: BettingStrategy
-) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Rows with at least one allowed, priced selection, and per selection: the
     probability the EV is judged with, the odds taken, the de-margined closing
-    probability, and the closing-line value ``p_closing × odds − 1``."""
+    probability, the closing-line value ``p_closing × odds − 1`` and, for
+    handicaps, the line the price refers to."""
     n = len(predictions)
     shape = (n, len(SELECTIONS))
     model = np.full(shape, np.nan)
+    anchored = np.full(shape, np.nan)
     closing = np.full(shape, np.nan)
     odds = np.full(shape, np.nan)
-    three, two = _price_columns(predictions, strategy)
-    if "1x2" in strategy.markets and all(c in predictions for c in ODDS_COLUMNS) and all(c in predictions for c in three):
+    lines = np.full(n, np.nan)
+    columns = _price_columns(predictions, strategy)
+    model_grids = anchored_grids = None
+
+    if "1x2" in strategy.markets and all(c in predictions for c in ODDS_COLUMNS + columns["1x2"]):
         model[:, :3] = predictions[PROB_COLUMNS].to_numpy(dtype=float)
-        odds[:, :3] = predictions[three].to_numpy(dtype=float)
+        if all(f"anchored_{c}" in predictions for c in PROB_COLUMNS):
+            anchored[:, :3] = predictions[[f"anchored_{c}" for c in PROB_COLUMNS]].to_numpy(dtype=float)
+        odds[:, :3] = predictions[columns["1x2"]].to_numpy(dtype=float)
         reference = predictions[ODDS_COLUMNS].to_numpy(dtype=float)
         priced = ~np.isnan(reference).any(axis=1)
         closing[priced, :3] = implied_probabilities(reference[priced], MARKET_DEMARGIN)
-    if ("totals" in strategy.markets and all(c in predictions for c in TOTALS_ODDS_COLUMNS + TOTALS_PROB_COLUMNS)
-            and all(c in predictions for c in two)):
-        model[:, 3:] = predictions[TOTALS_PROB_COLUMNS].to_numpy(dtype=float)
-        odds[:, 3:] = predictions[two].to_numpy(dtype=float)
+    if ("totals" in strategy.markets
+            and all(c in predictions for c in TOTALS_ODDS_COLUMNS + TOTALS_PROB_COLUMNS + columns["totals"])):
+        model[:, 3:5] = predictions[TOTALS_PROB_COLUMNS].to_numpy(dtype=float)
+        if all(f"anchored_{c}" in predictions for c in TOTALS_PROB_COLUMNS):
+            anchored[:, 3:5] = predictions[[f"anchored_{c}" for c in TOTALS_PROB_COLUMNS]].to_numpy(dtype=float)
+        odds[:, 3:5] = predictions[columns["totals"]].to_numpy(dtype=float)
         reference = predictions[TOTALS_ODDS_COLUMNS].to_numpy(dtype=float)
         priced = ~np.isnan(reference).any(axis=1)
-        closing[priced, 3:] = implied_probabilities(reference[priced], MARKET_DEMARGIN)
+        closing[priced, 3:5] = implied_probabilities(reference[priced], MARKET_DEMARGIN)
+    if ("handicap" in strategy.markets
+            and all(c in predictions for c in HANDICAP_ODDS_COLUMNS + ["ah_line"] + columns["handicap"]
+                    + [columns["handicap_line"]])):
+        odds[:, 5:7] = predictions[columns["handicap"]].to_numpy(dtype=float)
+        lines = predictions[columns["handicap_line"]].to_numpy(dtype=float)
+        model_grids = _grids(predictions, "")
+        anchored_grids = _grids(predictions, "anchored_")
+        model[:, 5:7] = _handicap_fair(model_grids, lines, odds[:, 5:7])
+        anchored[:, 5:7] = _handicap_fair(anchored_grids, lines, odds[:, 5:7])
+        reference = predictions[HANDICAP_ODDS_COLUMNS].to_numpy(dtype=float)
+        priced = ~np.isnan(reference).any(axis=1)
+        closing[priced, 5:7] = implied_probabilities(reference[priced], MARKET_DEMARGIN)
+
     if strategy.fair == "model":
         fair = model
     elif strategy.fair == "market":
         fair = closing
+    elif strategy.fair == "anchored":
+        fair = anchored
     elif strategy.fair == "blend":
         fair = strategy.blend_weight * closing + (1 - strategy.blend_weight) * model
     else:
@@ -340,14 +400,24 @@ def _selection_frame(
     keep = allowed.any(axis=1)
     odds = np.where(allowed, odds, np.nan)
     clv = closing * odds - 1.0
-    return predictions[keep].reset_index(drop=True), fair[keep], odds[keep], closing[keep], clv[keep]
+    return (predictions[keep].reset_index(drop=True), fair[keep], odds[keep], closing[keep], clv[keep], lines[keep])
 
 
-def _won(selection_index: np.ndarray, frame: pd.DataFrame) -> np.ndarray:
+def _profit_units(selection_index: np.ndarray, frame: pd.DataFrame, odds: np.ndarray, lines: np.ndarray) -> np.ndarray:
+    """Profit per unit stake of each bet once settled (pushes return the stake)."""
     outcome = frame["outcome"].to_numpy()
     over = frame["over"].to_numpy() if "over" in frame else np.zeros(len(frame), dtype=int)
-    return np.where(selection_index < 3, selection_index == outcome,
-                    np.where(selection_index == 3, over == 1, over == 0))
+    won_1x2 = selection_index == outcome
+    won_totals = np.where(selection_index == 3, over == 1, over == 0)
+    simple = np.where(np.where(selection_index < 3, won_1x2, won_totals), odds - 1.0, -1.0)
+    is_handicap = selection_index >= 5
+    units = simple.astype(float)
+    if is_handicap.any():
+        side = np.where(selection_index == 5, 1.0, -1.0)
+        units = np.where(is_handicap, handicap_profit(frame["home_goals"].to_numpy(dtype=float),
+                                                      frame["away_goals"].to_numpy(dtype=float), lines, odds, side),
+                         units)
+    return units
 
 
 def simulate_betting(
@@ -358,25 +428,29 @@ def simulate_betting(
     """Bet the highest-EV selection of each match when EV clears the threshold.
 
     Selections span the markets in ``strategy.markets``: home/draw/away at the
-    1X2 prices and over/under 2.5 goals at the totals prices. The EV is judged
-    with ``strategy.fair`` (the model, the de-margined closing line, or a
+    1X2 prices, over/under 2.5 goals at the totals prices and both sides of
+    the Asian handicap at its prices. The EV is judged with ``strategy.fair``
+    (the model, the de-margined closing line, the market-anchored grid, or a
     blend) at the price in ``strategy.price`` (closing reference, opening, or
     best price across bookmakers). Stakes are fractional Kelly on the bankroll
     at the start of each match day, capped per bet and per day, and settled at
-    the price taken. Every bet also records its closing-line value: the return
-    the de-margined closing price expects for that bet, the yardstick that
-    separates an edge from luck. Returns (bets, equity curve by day).
+    the price taken; handicap pushes return the stake and quarter lines settle
+    half on each neighbouring line. Every bet also records its closing-line
+    value: the return the de-margined closing price expects for that bet, the
+    yardstick that separates an edge from luck. Returns (bets, equity curve by day).
     """
     strategy = strategy or BettingStrategy()
     ordered = predictions.sort_values("kickoff").reset_index(drop=True)
-    priced, probabilities, odds, market, clv = _selection_frame(ordered, strategy)
+    priced, probabilities, odds, market, clv, lines = _selection_frame(ordered, strategy)
     ev = np.where(np.isnan(odds), -np.inf, expected_value(np.nan_to_num(probabilities), np.nan_to_num(odds, nan=1.0)))
     pick = ev.argmax(axis=1) if len(priced) else np.array([], dtype=int)
     rows = np.arange(len(priced))
+    market_names = np.array(["1x2"] * 3 + ["totals"] * 2 + ["handicap"] * 2)
     candidates = priced.assign(
         selection_index=pick,
         selection=SELECTIONS[pick],
-        market=np.where(pick < 3, "1x2", "totals"),
+        market=market_names[pick],
+        line=np.where(pick >= 5, lines, np.nan),
         odds=odds[rows, pick],
         p_model=probabilities[rows, pick],
         p_market=market[rows, pick],
@@ -397,15 +471,16 @@ def simulate_betting(
         cap = strategy.max_daily_exposure * bankroll
         if stakes.sum() > cap:
             stakes *= cap / stakes.sum()
-        won = _won(day_bets["selection_index"].to_numpy(), day_bets)
-        profit = np.where(won, stakes * (day_bets["odds"].to_numpy() - 1.0), -stakes)
+        units = _profit_units(day_bets["selection_index"].to_numpy(), day_bets, day_bets["odds"].to_numpy(dtype=float),
+                              day_bets["line"].to_numpy(dtype=float))
+        profit = stakes * units
         bankroll += profit.sum()
-        bets.append(day_bets.assign(stake=stakes, won=won, profit=profit, bankroll_after=bankroll))
+        bets.append(day_bets.assign(stake=stakes, units=units, won=units > 0, profit=profit, bankroll_after=bankroll))
         equity.append({"date": day, "bankroll": bankroll})
 
     columns = [
-        "match_id", "kickoff", "home_team", "away_team", "market", "selection", "odds", "p_model",
-        "p_market", "ev", "clv", "kelly", "stake", "won", "profit", "bankroll_after",
+        "match_id", "kickoff", "home_team", "away_team", "market", "selection", "line", "odds", "p_model",
+        "p_market", "ev", "clv", "kelly", "stake", "units", "won", "profit", "bankroll_after",
     ]
     bets_frame = pd.concat(bets, ignore_index=True)[columns] if bets else pd.DataFrame(columns=columns)
     equity_frame = pd.DataFrame(equity, columns=["date", "bankroll"])
@@ -425,7 +500,7 @@ def betting_metrics(
     if bets.empty:
         return {"bets": 0, "staked": 0.0, "profit": 0.0, "roi": float("nan"), "final_bankroll": initial_bankroll}
     peak = equity["bankroll"].cummax()
-    flat_profit = np.where(bets["won"], bets["odds"] - 1.0, -1.0).astype(float)
+    flat_profit = bets["units"].to_numpy(dtype=float)
     metrics = {
         "bets": len(bets),
         "staked": float(bets["stake"].sum()),
@@ -455,7 +530,7 @@ def betting_metrics(
     for market in MARKETS:
         picked = bets[bets["market"] == market] if "market" in bets else bets.iloc[0:0]
         metrics[f"bets_{market}"] = len(picked)
-        flat = np.where(picked["won"], picked["odds"] - 1.0, -1.0).astype(float)
+        flat = picked["units"].to_numpy(dtype=float)
         metrics[f"flat_stake_roi_{market}"] = float(flat.mean()) if len(picked) else float("nan")
         metrics[f"clv_{market}"] = float(picked["clv"].mean()) if len(picked) and "clv" in picked else float("nan")
     return metrics
@@ -567,7 +642,7 @@ def plot_pnl(result: BacktestResult, path: str | Path, title: str = "Cumulative 
 
     if not result.bets.empty:
         bets = result.bets
-        units = pd.Series(np.where(bets["won"], bets["odds"] - 1.0, -1.0), index=bets["kickoff"].dt.normalize())
+        units = pd.Series(bets["units"].to_numpy(dtype=float), index=bets["kickoff"].dt.normalize())
         flat = units.groupby(level=0).sum().cumsum()
         bottom.plot(
             flat.index, flat.to_numpy(), color="#d29922", linewidth=1.4,

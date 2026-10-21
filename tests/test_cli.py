@@ -123,3 +123,14 @@ def test_predict_shows_model_and_market_anchored_forecasts(tmp_path, capsys, off
     out = capsys.readouterr().out
     assert "Model forecast:" in out and "Market-anchored forecast" in out
     assert "source" in out and "market" in out  # the two unplayed fixtures carry prices from fixtures.csv
+
+
+def test_scan_lists_prices_against_fair_value(tmp_path, capsys, offline):
+    main(["--data-dir", str(tmp_path), "ingest", "--seasons", "2023", "--sources", "football_data", "understat"])
+    capsys.readouterr()
+    main(["--data-dir", str(tmp_path), "scan", "--upcoming", "30", "--as-of", "2023-09-10", "--ev-threshold", "-1"])
+    out = capsys.readouterr().out
+    assert "Fair value: anchored" in out
+    for word in ("1x2", "totals", "handicap", "bet365", "pinnacle", "stake_pct"):
+        assert word in out, word
+    assert " max " not in out  # best-of-market price hidden unless asked

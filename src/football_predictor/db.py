@@ -104,6 +104,17 @@ CREATE TABLE IF NOT EXISTS totals_odds (
     PRIMARY KEY (match_id, bookmaker, market_time, line)
 );
 
+-- Asian handicap prices per fixture, bookmaker and market time (the line is the home handicap).
+CREATE TABLE IF NOT EXISTS handicap_odds (
+    match_id     TEXT NOT NULL REFERENCES matches(match_id),
+    bookmaker    TEXT NOT NULL,
+    market_time  TEXT NOT NULL,
+    line         REAL NOT NULL,
+    home         REAL NOT NULL,
+    away         REAL NOT NULL,
+    PRIMARY KEY (match_id, bookmaker, market_time)
+);
+
 CREATE TABLE IF NOT EXISTS player_ratings (
     player_id      TEXT NOT NULL,
     player_name    TEXT NOT NULL,
@@ -134,6 +145,37 @@ DROP VIEW IF EXISTS v_best_odds;
 DROP VIEW IF EXISTS v_best_totals;
 DROP VIEW IF EXISTS v_open_odds;
 DROP VIEW IF EXISTS v_open_totals;
+DROP VIEW IF EXISTS v_best_handicap;
+DROP VIEW IF EXISTS v_open_handicap;
+
+CREATE VIEW v_best_handicap AS
+SELECT match_id, bookmaker, market_time, line, home, away
+FROM (
+    SELECT h.*,
+           ROW_NUMBER() OVER (
+               PARTITION BY match_id
+               ORDER BY CASE market_time WHEN 'closing' THEN 0 ELSE 1 END,
+                        CASE bookmaker WHEN 'pinnacle' THEN 0 WHEN 'average' THEN 1
+                                       WHEN 'bet365' THEN 2 ELSE 3 END
+           ) AS rnk
+    FROM handicap_odds h
+    WHERE bookmaker <> 'max'
+)
+WHERE rnk = 1;
+
+CREATE VIEW v_open_handicap AS
+SELECT match_id, bookmaker, line, home, away
+FROM (
+    SELECT h.*,
+           ROW_NUMBER() OVER (
+               PARTITION BY match_id
+               ORDER BY CASE bookmaker WHEN 'pinnacle' THEN 0 WHEN 'average' THEN 1
+                                       WHEN 'bet365' THEN 2 ELSE 3 END
+           ) AS rnk
+    FROM handicap_odds h
+    WHERE bookmaker <> 'max' AND market_time = 'opening'
+)
+WHERE rnk = 1;
 
 -- Earliest listed price per fixture (Football-Data's pre-match column), sharp first.
 CREATE VIEW v_open_odds AS
@@ -216,7 +258,11 @@ SELECT m.match_id, m.season, m.division, m.kickoff,
        op.home AS open_home, op.draw AS open_draw, op.away AS open_away,
        mx.home AS max_home, mx.draw AS max_draw, mx.away AS max_away,
        ot.over AS open_over_2_5, ot.under AS open_under_2_5,
-       mt.over AS max_over_2_5, mt.under AS max_under_2_5
+       mt.over AS max_over_2_5, mt.under AS max_under_2_5,
+       h.bookmaker AS handicap_bookmaker, h.market_time AS handicap_market_time,
+       h.line AS ah_line, h.home AS odds_ah_home, h.away AS odds_ah_away,
+       oh.line AS open_ah_line, oh.home AS open_ah_home, oh.away AS open_ah_away,
+       mh.line AS max_ah_line, mh.home AS max_ah_home, mh.away AS max_ah_away
 FROM matches m
 JOIN teams ht ON ht.team_id = m.home_team_id
 JOIN teams at ON at.team_id = m.away_team_id
@@ -230,7 +276,10 @@ LEFT JOIN v_open_odds op ON op.match_id = m.match_id
 LEFT JOIN odds mx ON mx.match_id = m.match_id AND mx.bookmaker = 'max' AND mx.market_time = 'closing'
 LEFT JOIN v_open_totals ot ON ot.match_id = m.match_id
 LEFT JOIN totals_odds mt ON mt.match_id = m.match_id AND mt.bookmaker = 'max' AND mt.market_time = 'closing'
-    AND mt.line = 2.5;
+    AND mt.line = 2.5
+LEFT JOIN v_best_handicap h ON h.match_id = m.match_id
+LEFT JOIN v_open_handicap oh ON oh.match_id = m.match_id
+LEFT JOIN handicap_odds mh ON mh.match_id = m.match_id AND mh.bookmaker = 'max' AND mh.market_time = 'closing';
 """
 
 SOURCE_RANK = {"football_data": 0, "fbref": 1, "understat": 2, "manual": 3}
@@ -382,6 +431,22 @@ class Database:
 
     def upsert_totals_odds(self, frame: pd.DataFrame) -> None:
         self._upsert("totals_odds", ["match_id", "bookmaker", "market_time", "line"], frame)
+
+    def upsert_handicap_odds(self, frame: pd.DataFrame) -> None:
+        self._upsert("handicap_odds", ["match_id", "bookmaker", "market_time"], frame)
+
+    def load_prices(self, match_ids) -> dict[str, pd.DataFrame]:
+        """Every stored price for the given fixtures: {'1x2', 'totals', 'handicap'} long frames."""
+        ids = list(match_ids)
+        if not ids:
+            empty = pd.DataFrame()
+            return {"1x2": empty, "totals": empty, "handicap": empty}
+        marks = ", ".join("?" * len(ids))
+        return {
+            "1x2": self.query(f"SELECT * FROM odds WHERE match_id IN ({marks})", ids),
+            "totals": self.query(f"SELECT * FROM totals_odds WHERE match_id IN ({marks}) AND line = 2.5", ids),
+            "handicap": self.query(f"SELECT * FROM handicap_odds WHERE match_id IN ({marks})", ids),
+        }
 
     def upsert_player_ratings(self, frame: pd.DataFrame) -> None:
         self._upsert("player_ratings", ["player_id", "snapshot_date"], frame)
