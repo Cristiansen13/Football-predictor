@@ -49,7 +49,7 @@ Each target is a thin wrapper around the CLI:
 | `football-predictor check-sources [--season 2024]` | fetch and parse one live page per source |
 | `football-predictor status [--audit N]` | data coverage report, quality issues, point-in-time audit of N matches |
 | `football-predictor ratings [--as-of DATE]` | team attack/defence ratings |
-| `football-predictor predict HOME AWAY` / `--upcoming DAYS` | score grid, markets, best-EV bet and stake |
+| `football-predictor predict HOME AWAY` / `--upcoming DAYS` | model and market-anchored forecasts: score grids, markets, best-EV bet and stake |
 | `football-predictor backtest [--test-season Y \| --test-seasons A-B] [--tune] [--compare] [--markets 1x2 totals] [--fair model\|market\|blend] [--price closing\|opening\|max]` | walk-forward evaluation and betting simulation, 1X2 and over/under 2.5 |
 
 Reports go to `data/reports/` (`metrics_<season>.json`, predictions, bets,
@@ -156,6 +156,17 @@ log μ = c[div]          + attack[away] + defence[home] + θ_att·A(away) + θ_d
 renormalised away, so the 1X2 probabilities sum to one. `market_probabilities`
 aggregates the grid into home/draw/away, over/under 2.5 and both-teams-to-score.
 
+**Market-anchored grid** (`models/anchored.py`, `DixonColesModel.predict_anchored`).
+The closing line is the best pre-match forecast of the result, but it says
+nothing directly about the score. The grid is the bridge: `rates_from_probabilities`
+finds the two scoring rates whose Dixon-Coles grid reproduces the market's
+home-win, away-win and over-2.5 probabilities (least squares when all three
+are priced, exact when only 1X2 is), and the full correct-score distribution
+follows. Fixtures without prices fall back to the model's own rates; each row
+says which (`source`). `predict` prints both forecasts and both score grids,
+and the backtest scores both (`anchored_*` metrics, `--anchor-price` picks
+closing or opening prices).
+
 ## 5. Validation and backtesting
 
 `run_backtest` refits every `--refit-days` using only matches before each block.
@@ -215,6 +226,25 @@ against Pinnacle or market-average closing prices.
 | 1X2 (three-way Brier) | 0.579 | 0.567 | +0.012 | +0.007 to +0.017 |
 | Over/under 2.5 (binary Brier) | 0.242 | 0.240 | +0.002 | −0.000 to +0.004 |
 | Both teams to score (binary Brier, no market prices) | 0.246 | — | — | — |
+
+Predicting the winner and the score, same run, with the market-anchored
+forecast alongside (rates that reproduce the closing prices through the grid):
+
+| Forecast | Winner accuracy | Winner Brier | Exact score right | Score log loss |
+| :--- | :--- | :--- | :--- | :--- |
+| Model | 53.6% | 0.579 | 11.3% | 2.969 |
+| Market-anchored grid | 55.4% | 0.567 | 12.0% | 2.933 |
+| Closing market (1X2 only) | 55.4% | 0.567 | — | — |
+| Historical frequencies 2014–2020 | 44.2% | 0.646 | 11.1% (always 1-1) | 3.092 |
+
+The anchored grid is the best forecast these data allow: the market's winner
+probabilities (reproducing them costs 0.0002 Brier) and a score distribution
+that names the right score 12% of the time against the model's 11.3% and the
+11.1% of always saying 1-1. Exact scores are mostly luck: a calibrated
+forecast tops out near 12–13% on its most likely score, and the model's value
+is in the whole distribution (the actual score is in its top five 47% of the
+time). The model remains the forecast for fixtures without prices and the
+independent second opinion next to the market's.
 
 | Season | 1X2 model | 1X2 market | Over 2.5 model | Over 2.5 market |
 | :--- | :--- | :--- | :--- | :--- |

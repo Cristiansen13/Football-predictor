@@ -492,6 +492,20 @@ class DixonColesModel:
         markets.index = fixtures.index
         return markets
 
+    def predict_anchored(
+        self,
+        fixtures: pd.DataFrame,
+        price_columns: tuple[str, str, str] = ("odds_home", "odds_draw", "odds_away"),
+        totals_columns: tuple[str, str] = ("odds_over_2_5", "odds_under_2_5"),
+    ) -> pd.DataFrame:
+        """Market-anchored forecast: rates that reproduce the fixture's prices, with this
+        model's ρ and grid size, and this model's rates where a fixture has no prices."""
+        from .anchored import anchored_forecast
+
+        lam, mu = self.expected_goals(fixtures)
+        return anchored_forecast(fixtures, rho=self.rho_, max_goals=self.max_goals, fallback=(lam, mu),
+                                 price_columns=price_columns, totals_columns=totals_columns)
+
     def log_likelihood(self, matches: pd.DataFrame) -> np.ndarray:
         """Per-match log-likelihood of the observed scores (out-of-sample evaluation)."""
         lam, mu = self.expected_goals(matches)

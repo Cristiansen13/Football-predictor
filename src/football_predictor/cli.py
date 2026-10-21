@@ -289,26 +289,48 @@ def _with_value(fixtures: pd.DataFrame, predictions: pd.DataFrame, kelly_multipl
     return out
 
 
+def _score_grid(lam: float, mu: float, model: DixonColesModel, home: str, away: str) -> pd.DataFrame:
+    from .models import score_matrices
+
+    goals = range(model.max_goals + 1)
+    return pd.DataFrame(score_matrices(lam, mu, model.rho_, model.max_goals)[0],
+                        index=pd.Index(goals, name=f"{home} goals"), columns=pd.Index(goals, name=f"{away} goals"))
+
+
 def cmd_predict(args: argparse.Namespace) -> None:
     data, fixtures = _fixture_rows(args)
     model = model_factory(args)().fit(data, as_of=fixtures["kickoff"].min())
     predictions = pd.concat([fixtures[["kickoff", "home_team", "away_team"]], model.predict(fixtures)], axis=1)
     predictions = _with_value(fixtures, predictions, args.kelly)
     predictions["kickoff"] = predictions["kickoff"].dt.strftime("%Y-%m-%d %H:%M")
+    anchored = model.predict_anchored(fixtures)
+    print("Model forecast:")
     print(predictions.round(3).to_string(index=False))
+    print("\nMarket-anchored forecast (rates that reproduce the current prices; 'model' where a fixture has none):")
+    shown = pd.concat([predictions[["kickoff", "home_team", "away_team"]], anchored], axis=1)
+    print(shown.round(3).to_string(index=False))
     if len(fixtures) == 1:
         row = fixtures.iloc[0]
         features = {c: row[c] for c in fixtures.columns if c.startswith(("home_", "away_"))
                     and c not in ("home_team", "away_team", "home_goals", "away_goals")}
         matrix = model.score_matrix(row["home_team"], row["away_team"], division=row.get("division", args.division),
                                     **features)
-        print("\nCorrect-score probabilities (%):")
+        print("\nCorrect-score probabilities (%), model:")
         print((matrix * 100).round(1).to_string())
+        if anchored["source"].iloc[0] != "model":
+            grid = _score_grid(float(anchored["exp_home_goals"].iloc[0]), float(anchored["exp_away_goals"].iloc[0]),
+                               model, row["home_team"], row["away_team"])
+            print("\nCorrect-score probabilities (%), market-anchored:")
+            print((grid * 100).round(1).to_string())
 
 
 METRIC_SECTIONS = {
     "Forecast quality": ["matches", "brier_model", "rps_model", "log_loss_model", "score_log_loss_model",
-                         "accuracy_model", "ece_model", "brier_base_rate", "brier_skill_vs_base_rate"],
+                         "score_hit_model", "accuracy_model", "ece_model", "brier_base_rate",
+                         "brier_skill_vs_base_rate"],
+    "Market-anchored forecast": ["anchored_share_market", "brier_anchored", "rps_anchored", "log_loss_anchored",
+                                 "accuracy_anchored", "ece_anchored", "score_log_loss_anchored", "score_hit_anchored",
+                                 "brier_over_anchored"],
     "Against the market": ["matches_with_odds", "brier_model_priced", "brier_market", "brier_skill_vs_market",
                            "brier_diff_vs_market", "brier_diff_ci_low", "brier_diff_ci_high", "rps_market",
                            "log_loss_market", "accuracy_market", "ece_market", "mean_overround"],
@@ -341,7 +363,11 @@ def season_breakdown(result: BacktestResult) -> pd.DataFrame:
                 "matches": len(predictions),
                 "brier_model": m["brier_model"],
                 "brier_market": m.get("brier_market", np.nan),
-                "diff_vs_market": m.get("brier_diff_vs_market", np.nan),
+                "brier_anchored": m.get("brier_anchored", np.nan),
+                "accuracy_model": m["accuracy_model"],
+                "accuracy_anchored": m.get("accuracy_anchored", np.nan),
+                "score_hit_model": m.get("score_hit_model", np.nan),
+                "score_hit_anchored": m.get("score_hit_anchored", np.nan),
                 "brier_over_model": m.get("brier_over_model", np.nan),
                 "brier_over_market": m.get("brier_over_market", np.nan),
                 "bets": len(picked),
@@ -430,7 +456,8 @@ def cmd_backtest(args: argparse.Namespace) -> None:
             kwargs = {**model_kwargs(args), "attack_features": FEATURE_PRESETS[preset][0],
                       "defence_features": FEATURE_PRESETS[preset][1]}
             result = run_backtest(data, partial(DixonColesModel, **kwargs), start, end, refit_days=args.refit_days,
-                                  strategy=strategy, initial_bankroll=args.bankroll, divisions=divisions)
+                                  strategy=strategy, initial_bankroll=args.bankroll, divisions=divisions,
+                                  anchor_price=args.anchor_price)
             rows.append({"features": preset, **result.metrics})
         table = pd.DataFrame(rows)
         columns = ["features", "brier_model", "brier_market", "brier_over_model", "brier_over_market",
@@ -444,6 +471,7 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     result = run_backtest(
         data, model_factory(args), start, end,
         refit_days=args.refit_days, strategy=strategy, initial_bankroll=args.bankroll, divisions=divisions,
+        anchor_price=args.anchor_price,
     )
     print(f"Test {'season' if label == str(test_season) else 'seasons'} {label} ({args.division}) | "
           f"xi={args.xi} | xg_weight={args.xg_weight} | features={args.features} | "
@@ -553,6 +581,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="probability the EV is judged with: the model, the de-margined closing line "
                              "(sharp price as fair value), or a blend (default: model)")
         bt.add_argument("--blend-weight", type=float, default=0.5, help="weight on the market in --fair blend")
+        bt.add_argument("--anchor-price", choices=["closing", "opening"], default="closing",
+                        help="prices the market-anchored forecast is built from (default: closing)")
         bt.add_argument("--price", choices=["closing", "opening", "max"], default="closing",
                         help="price to bet at: the closing reference, the earliest listed price, or the best "
                              "price across bookmakers (default: closing)")

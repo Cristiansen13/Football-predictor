@@ -289,3 +289,19 @@ def test_fair_value_source_and_price_options():
     fallback, _ = simulate_betting(sparse, BettingStrategy(ev_threshold=0.0, price="max", markets=("1x2",)))
     closing, _ = simulate_betting(sparse, BettingStrategy(ev_threshold=0.0, price="closing", markets=("1x2",)))
     pd.testing.assert_frame_equal(fallback, closing)
+
+
+def test_walk_forward_reports_anchored_forecast_and_score_hits(league):
+    from football_predictor.evaluation.backtest import evaluate_forecasts
+
+    start = league.loc[league["season"] == 2022, "kickoff"].min().normalize()
+    predictions = walk_forward_predictions(league, DixonColesModel, start, refit_days=56, divisions=["E0"])
+    for column in ("anchored_p_home", "anchored_source", "modal_score_model", "modal_score_anchored",
+                   "score_hit_model", "score_prob_anchored"):
+        assert column in predictions, column
+    assert set(predictions["anchored_source"]) == {"market"}
+    assert predictions["modal_score_model"].str.match(r"^\d-\d$").all()
+    metrics = evaluate_forecasts(predictions, n_resamples=0)
+    assert abs(metrics["brier_anchored"] - metrics["brier_market"]) < 0.01  # anchored on the same prices
+    assert 0.0 < metrics["score_hit_model"] < 0.3 and 0.0 < metrics["score_hit_anchored"] < 0.3
+    assert metrics["score_log_loss_anchored"] > 0 and metrics["accuracy_anchored"] > 0.3

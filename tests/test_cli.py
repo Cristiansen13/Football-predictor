@@ -52,7 +52,7 @@ def test_ingest_status_and_predict(tmp_path, capsys, offline):
 
     main(["--data-dir", str(tmp_path), "predict", "--upcoming", "30", "--as-of", "2023-09-10", "--xg-weight", "0.3"])
     out = capsys.readouterr().out
-    assert out.count("2023-09-16") == 2  # the two unplayed fixtures of the last round
+    assert out.count("2023-09-16") == 4  # the two unplayed fixtures of the last round, in both forecast tables
     assert "best_ev" in out and "stake_pct" in out  # priced from fixtures.csv
 
 
@@ -114,3 +114,12 @@ def test_backtest_over_several_seasons_reports_each(tmp_path, capsys):
     assert (tmp_path / "reports" / "metrics_2022-2023.json").exists()
     metrics = json.loads((tmp_path / "reports" / "metrics_2022-2023.json").read_text())
     assert metrics["matches"] == 760 and metrics["bets_1x2"] == 0
+
+
+def test_predict_shows_model_and_market_anchored_forecasts(tmp_path, capsys, offline):
+    main(["--data-dir", str(tmp_path), "ingest", "--seasons", "2023", "--sources", "football_data", "understat"])
+    capsys.readouterr()
+    main(["--data-dir", str(tmp_path), "predict", "--upcoming", "30", "--as-of", "2023-09-10"])
+    out = capsys.readouterr().out
+    assert "Model forecast:" in out and "Market-anchored forecast" in out
+    assert "source" in out and "market" in out  # the two unplayed fixtures carry prices from fixtures.csv

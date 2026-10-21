@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from ..models.dixon_coles import DixonColesModel
+from ..models.probability import score_matrices
 from .betting import expected_value, kelly_fraction
 from .metrics import (
     accuracy,
@@ -99,12 +100,19 @@ def walk_forward_predictions(
     *,
     refit_days: int = 7,
     divisions: Iterable[str] | None = None,
+    anchor_price: str = "closing",
 ) -> pd.DataFrame:
     """Refit every ``refit_days`` on matches before the block, predict the block.
 
     The model never sees a result from on or after the block start, so every
     forecast is one that could have been made at the time. It trains on every
     division in ``data`` but only matches in ``divisions`` are predicted.
+
+    Besides the model's forecast each row carries the market-anchored one
+    (``anchored_*``: rates that reproduce the fixture's ``anchor_price``
+    prices through the same grid, the model's rates where there are none),
+    and for both the most likely score, whether it came up, and the
+    probability given to the actual score.
     """
     data = data.assign(kickoff=pd.to_datetime(data["kickoff"])).sort_values("kickoff")
     start = pd.Timestamp(start)
@@ -121,6 +129,25 @@ def walk_forward_predictions(
         model = model_factory().fit(data, as_of=block_start, warm_start=model)
         predicted = model.predict(block)
         predicted["score_loglik"] = model.log_likelihood(block)
+        three, two = PRICE_COLUMNS[anchor_price]
+        anchored = model.predict_anchored(block, price_columns=tuple(three), totals_columns=tuple(two))
+        for column in anchored.columns:
+            predicted[f"anchored_{column}"] = anchored[column].to_numpy()
+        grids = {
+            "model": model.score_matrices(block),
+            "anchored": score_matrices(anchored["exp_home_goals"].to_numpy(), anchored["exp_away_goals"].to_numpy(),
+                                       model.rho_, model.max_goals),
+        }
+        home = np.clip(block["home_goals"].to_numpy(dtype=int), 0, model.max_goals)
+        away = np.clip(block["away_goals"].to_numpy(dtype=int), 0, model.max_goals)
+        rows = np.arange(len(block))
+        for name, grid in grids.items():
+            flat = grid.reshape(len(block), -1)
+            modal = flat.argmax(axis=1)
+            width = model.max_goals + 1
+            predicted[f"modal_score_{name}"] = [f"{m // width}-{m % width}" for m in modal]
+            predicted[f"score_hit_{name}"] = (modal == home * width + away).astype(int)
+            predicted[f"score_prob_{name}"] = grid[rows, home, away]
         blocks.append(pd.concat([block, predicted], axis=1).assign(fitted_as_of=block_start))
     if not blocks:
         raise ValueError(f"No played matches between {start} and {end}")
@@ -165,6 +192,26 @@ def evaluate_forecasts(
     }
     if "score_loglik" in predictions:
         metrics["score_log_loss_model"] = float(-predictions["score_loglik"].mean())
+    if "score_hit_model" in predictions:
+        metrics["score_hit_model"] = float(predictions["score_hit_model"].mean())
+    if "anchored_p_home" in predictions:
+        anchored = predictions[["anchored_p_home", "anchored_p_draw", "anchored_p_away"]].to_numpy(dtype=float)
+        metrics.update(
+            {
+                "anchored_share_market": float((predictions["anchored_source"] != "model").mean()),
+                "brier_anchored": brier_score(anchored, outcomes),
+                "rps_anchored": ranked_probability_score(anchored, outcomes),
+                "log_loss_anchored": log_loss(anchored, outcomes),
+                "accuracy_anchored": accuracy(anchored, outcomes),
+                "ece_anchored": expected_calibration_error(anchored, outcomes),
+            }
+        )
+        if "score_prob_anchored" in predictions:
+            metrics["score_log_loss_anchored"] = float(-np.log(np.clip(predictions["score_prob_anchored"], 1e-12, None)).mean())
+            metrics["score_hit_anchored"] = float(predictions["score_hit_anchored"].mean())
+        if "over" in predictions:
+            metrics["brier_over_anchored"] = binary_brier(predictions["anchored_p_over_2_5"].to_numpy(dtype=float),
+                                                          predictions["over"].to_numpy(dtype=float))
     if reference_rates is not None:
         climatology = np.tile(reference_rates, (len(predictions), 1))
         metrics["brier_base_rate"] = brier_score(climatology, outcomes)
@@ -425,9 +472,10 @@ def run_backtest(
     initial_bankroll: float = 1000.0,
     divisions: Iterable[str] | None = None,
     n_resamples: int = 2000,
+    anchor_price: str = "closing",
 ) -> BacktestResult:
     predictions = walk_forward_predictions(
-        data, model_factory, start, end, refit_days=refit_days, divisions=divisions
+        data, model_factory, start, end, refit_days=refit_days, divisions=divisions, anchor_price=anchor_price
     )
     bets, equity = simulate_betting(predictions, strategy, initial_bankroll)
     rates = base_rates(data, pd.Timestamp(start), divisions)

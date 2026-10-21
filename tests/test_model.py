@@ -196,3 +196,59 @@ def test_features_enter_the_rates(league):
     boosted = row.assign(home_ewma_xg_for=row["home_ewma_xg_for"] + 0.5)
     lam, _ = model.expected_goals(boosted)
     assert np.sign(lam[0] - base[0]) == np.sign(model.theta_attack_["ewma_xg_for"])
+
+
+def test_rates_from_market_probabilities_round_trip():
+    from football_predictor.models import anchored_forecast, rates_from_probabilities
+    from football_predictor.models.probability import market_probabilities, score_matrices
+
+    lam, mu, rho = np.array([1.7, 0.9, 2.4]), np.array([1.1, 1.6, 0.6]), -0.06
+    markets = market_probabilities(score_matrices(lam, mu, rho, 6))
+    # Three targets, two rates: the grid can reproduce its own numbers exactly.
+    lam_hat, mu_hat = rates_from_probabilities(markets["p_home"], markets["p_away"], markets["p_over_2_5"], rho=rho)
+    assert np.allclose(lam_hat, lam, atol=1e-3) and np.allclose(mu_hat, mu, atol=1e-3)
+    # Home and away alone pin the rates down too.
+    lam_hat, mu_hat = rates_from_probabilities(markets["p_home"], markets["p_away"], rho=rho)
+    assert np.allclose(lam_hat, lam, atol=1e-3) and np.allclose(mu_hat, mu, atol=1e-3)
+    # A missing input gives NaN rates for that row only.
+    lam_hat, _ = rates_from_probabilities([markets["p_home"][0], np.nan], [markets["p_away"][0], 0.3], rho=rho)
+    assert np.isfinite(lam_hat[0]) and np.isnan(lam_hat[1])
+
+    # Prices with a margin, one fixture without totals, one without any price.
+    fixtures = pd.DataFrame(
+        {
+            "odds_home": [1.95, 2.6, np.nan], "odds_draw": [3.6, 3.3, np.nan], "odds_away": [4.0, 2.8, np.nan],
+            "odds_over_2_5": [1.85, np.nan, np.nan], "odds_under_2_5": [2.0, np.nan, np.nan],
+        }
+    )
+    forecast = anchored_forecast(fixtures, rho=rho, fallback=(np.array([1.5, 1.5, 1.2]), np.array([1.2, 1.2, 1.4])))
+    assert list(forecast["source"]) == ["market", "market_1x2", "model"]
+    assert np.allclose(forecast[["p_home", "p_draw", "p_away"]].sum(axis=1), 1.0)
+    assert forecast.loc[2, "exp_home_goals"] == 1.2 and forecast.loc[2, "exp_away_goals"] == 1.4
+    from football_predictor.evaluation.metrics import implied_probabilities
+
+    fair = implied_probabilities(fixtures.loc[[1], ["odds_home", "odds_draw", "odds_away"]].to_numpy(), "power")[0]
+    assert np.allclose(forecast.loc[1, ["p_home", "p_draw", "p_away"]].to_numpy(dtype=float), fair, atol=1e-3)
+
+
+def test_model_predict_anchored_tracks_the_market(league):
+    data, _ = league
+    model = DixonColesModel(xi=0.003).fit(data, as_of="2022-01-01")
+    fixtures = data[(data["kickoff"] >= "2022-01-01") & (data["division"] == "E0")].head(40)
+    anchored = model.predict_anchored(fixtures)
+    plain = model.predict(fixtures)
+    assert list(anchored.columns) == list(plain.columns) + ["source"]
+    assert (anchored["source"] == "market").all()
+    from football_predictor.evaluation.metrics import implied_probabilities
+
+    fair = implied_probabilities(fixtures[["odds_home", "odds_draw", "odds_away"]].to_numpy(dtype=float), "power")
+    # With totals prices too, two rates serve three targets: a compromise, but a close one.
+    assert np.abs(anchored[["p_home", "p_draw", "p_away"]].to_numpy(dtype=float) - fair).mean() < 0.03
+    # With 1X2 prices alone the winner probabilities are reproduced exactly.
+    only_1x2 = model.predict_anchored(fixtures.drop(columns=["odds_over_2_5", "odds_under_2_5"]))
+    assert (only_1x2["source"] == "market_1x2").all()
+    assert np.abs(only_1x2[["p_home", "p_away"]].to_numpy(dtype=float) - fair[:, [0, 2]]).max() < 1e-3
+    unpriced = fixtures.drop(columns=["odds_home", "odds_draw", "odds_away", "odds_over_2_5", "odds_under_2_5"])
+    fallback = model.predict_anchored(unpriced)
+    assert (fallback["source"] == "model").all()
+    pd.testing.assert_frame_equal(fallback.drop(columns="source"), plain)
