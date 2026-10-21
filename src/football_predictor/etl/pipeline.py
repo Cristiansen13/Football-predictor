@@ -38,13 +38,15 @@ class Pipeline:
         # Pages for an unfinished season change every week, so never cache them.
         self.current_season = current_season
         self.divisions = tuple(divisions)
+        self._created: set[str] = set()
 
     def _cache(self, season: int) -> dict[str, bool]:
         return {"use_cache": season != self.current_season}
 
     def team_id(self, name: str, source: str, *, create_missing: bool = False) -> str:
         resolution = self.resolver.resolve(name, create_missing=create_missing)
-        if resolution.method == "created":
+        if resolution.method == "created" and name not in self._created:
+            self._created.add(name)
             log.info("%s: registered new club %r", source, name)
         return self.db.register_team(resolution, source)
 

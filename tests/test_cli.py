@@ -1,5 +1,7 @@
 import json
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from football_predictor import cli
@@ -70,3 +72,18 @@ def test_check_sources_exits_non_zero_on_failure(tmp_path, capsys, monkeypatch, 
         main(["--data-dir", str(tmp_path), "check-sources", "--season", "2023", "--sources", "understat"])
     assert failed.value.code == 1
     assert "FAIL understat" in capsys.readouterr().out
+
+
+def test_default_test_season_skips_an_unfinished_season():
+    from football_predictor.cli import default_test_season
+
+    data = pd.DataFrame(
+        {
+            "division": ["E0"] * 4 + ["E1"],
+            "season": [2024, 2024, 2025, 2025, 2026],
+            "home_goals": [1.0, 0.0, 2.0, np.nan, np.nan],
+        }
+    )
+    assert default_test_season(data, "E0") == 2024
+    assert default_test_season(data.dropna(), "E0") == 2025
+    assert default_test_season(data, "E1") == 2026  # nothing complete yet: latest season

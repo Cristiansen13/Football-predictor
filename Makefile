@@ -22,10 +22,13 @@ demo:               ## full backtest on a simulated league, no network
 check:              ## is every source reachable and parseable right now?
 	$(CLI) check-sources
 
-data:               ## results, odds (PL + Championship), xG/PPDA, possession, cup fixtures
-	$(CLI) ingest --sources football_data understat fbref
+data:               ## results, odds (PL + Championship), xG/PPDA
+	$(CLI) ingest --sources football_data understat
 
-data-full: data     ## + starting XIs and SOFIFA ratings (slow: hours on first run, resumable)
+data-fbref:         ## possession and cup fixtures; FBref currently serves a Cloudflare challenge to browsers
+	$(CLI) ingest --sources fbref
+
+data-full: data     ## + starting XIs and SOFIFA ratings (slow: hours on first run, resumable; SOFIFA also behind Cloudflare)
 	$(CLI) ingest --sources understat sofifa --lineups
 
 status:             ## coverage per season, data issues, leakage audit

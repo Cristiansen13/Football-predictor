@@ -326,11 +326,26 @@ def _season_window(data: pd.DataFrame, season: int, division: str) -> tuple[pd.T
     return rows["kickoff"].min().normalize(), rows["kickoff"].max() + pd.Timedelta(seconds=1)
 
 
+def default_test_season(data: pd.DataFrame, division: str) -> int:
+    """The latest season of ``division`` with every fixture played.
+
+    During a season the warehouse holds the whole fixture list with results for
+    the rounds played so far; scoring those few matches says little, so the
+    previous, complete season is used instead. The latest season is kept when
+    no season is complete (the first season of a fresh database).
+    """
+    rows = data[data["division"] == division]
+    if rows.empty:
+        raise SystemExit(f"No {division} matches loaded")
+    unplayed = rows.groupby("season")["home_goals"].apply(lambda g: g.isna().any())
+    complete = unplayed[~unplayed].index
+    return int(complete.max() if len(complete) else rows["season"].max())
+
+
 def cmd_backtest(args: argparse.Namespace) -> None:
     data = load_features(args)
     divisions = [args.division]
-    seasons = sorted(data.loc[data["division"] == args.division, "season"].unique())
-    test_season = args.test_season if args.test_season is not None else int(seasons[-1])
+    test_season = args.test_season if args.test_season is not None else default_test_season(data, args.division)
     start, end = _season_window(data, test_season, args.division)
 
     if args.tune:
@@ -481,7 +496,17 @@ def build_parser() -> argparse.ArgumentParser:
 NETWORK_COMMANDS = {"ingest", "check-sources"}
 
 
+def _utf8_console() -> None:
+    """Windows consoles default to a legacy code page; team names and error
+    messages carry characters it cannot encode, which would abort a report."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None and (stream.encoding or "").lower().replace("-", "") != "utf8":
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> None:
+    _utf8_console()
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command in NETWORK_COMMANDS:

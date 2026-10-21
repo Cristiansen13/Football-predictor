@@ -30,8 +30,9 @@ With real data:
 
 ```bash
 make check             # is every source reachable and parseable right now?
-make data              # results + odds (PL and Championship), xG/PPDA, possession, cup fixtures
-make data-full         # + starting XIs and SOFIFA ratings (slow on the first run, resumable)
+make data              # results + odds (PL and Championship), xG/PPDA
+make data-fbref        # + possession and cup fixtures (FBref; see the caveat on anti-bot challenges)
+make data-full         # + starting XIs and SOFIFA ratings (slow on the first run, resumable; same caveat)
 make status            # coverage per season, data issues, leakage audit
 make backtest          # tune ξ and xG weight on the previous season, test on the last one
 make predict           # this week's fixtures: probabilities, EV against current prices
@@ -168,6 +169,12 @@ once with the chosen setup. Otherwise the choice itself leaks test information.
   it shows exactly which source parses and which needs a selector update.
 * SOFIFA and the anti-bot fallback need a Chromium that matches the installed
   Playwright (`make install-browser`), or pass `--chromium-path`.
+* As of October 2026 FBref and SOFIFA answer every automated browser, headless
+  or `--headful`, with a Cloudflare Turnstile challenge, so `make data` leaves
+  them out. Football-Data and Understat cover everything the `none` and `form`
+  presets need; without FBref the fatigue index ignores cup fixtures, and
+  without SOFIFA the `full` preset has no lineup strength. `make check` shows
+  when either site becomes reachable again.
 * Lineups cost one request per match and SOFIFA one page load per 60 players
   per snapshot, so expect the first `make data-full` to take hours. Re-runs
   resume where they stopped.

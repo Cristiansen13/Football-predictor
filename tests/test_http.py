@@ -93,3 +93,55 @@ def test_retry_after_parsing():
     assert _retry_after(None, 3.0) == 3.0
     assert _retry_after("not a date", 2.0) == 2.0
     assert _retry_after("Wed, 21 Oct 2015 07:28:00 GMT", 5.0) == 0.0  # in the past
+
+
+def test_browser_sessions_share_one_playwright_driver(monkeypatch):
+    """Two open browser sessions (HTTP fallback + SOFIFA) must not start a second
+    Playwright driver: its sync API refuses that in the same thread."""
+    import sys
+    import types
+
+    from football_predictor.etl import browser as browser_module
+
+    started, stopped = [], []
+
+    class FakePage:
+        pass
+
+    class FakeBrowser:
+        def new_page(self):
+            return FakePage()
+
+        def close(self):
+            pass
+
+    class FakeChromium:
+        def launch(self, **kwargs):
+            return FakeBrowser()
+
+    class FakeDriver:
+        chromium = FakeChromium()
+
+        def stop(self):
+            stopped.append(self)
+
+    class FakeContext:
+        def start(self):
+            driver = FakeDriver()
+            started.append(driver)
+            return driver
+
+    fake_module = types.ModuleType("playwright.sync_api")
+    fake_module.sync_playwright = lambda: FakeContext()
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_module)
+    monkeypatch.setattr(browser_module, "_driver", {"playwright": None, "users": 0})
+
+    first = browser_module.BrowserFetcher().start()
+    second = browser_module.BrowserFetcher().start()
+    assert len(started) == 1 and first._playwright is second._playwright
+    first.close()
+    assert stopped == []  # still in use by the second session
+    second.close()
+    assert stopped == started
+    browser_module.BrowserFetcher().start().close()
+    assert len(started) == 2  # a fresh driver once every session has closed

@@ -23,6 +23,31 @@ def is_challenge_page(html: str) -> bool:
     return any(marker in head for marker in CHALLENGE_MARKERS)
 
 
+# One Playwright driver per process. Playwright's sync API refuses to start a
+# second driver in a thread that already runs one, so the HTTP fallback browser
+# and the SOFIFA browser (often open at the same time) share this one and
+# release it when the last of them closes.
+_driver = {"playwright": None, "users": 0}
+
+
+def _acquire_playwright():
+    if _driver["playwright"] is None:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError("Install the 'scraping' extra: pip install -e '.[scraping]'") from exc
+        _driver["playwright"] = sync_playwright().start()
+    _driver["users"] += 1
+    return _driver["playwright"]
+
+
+def _release_playwright() -> None:
+    _driver["users"] = max(0, _driver["users"] - 1)
+    if _driver["users"] == 0 and _driver["playwright"] is not None:
+        _driver["playwright"].stop()
+        _driver["playwright"] = None
+
+
 class BrowserFetcher:
     """Lazily started browser session; usable as a context manager or via close()."""
 
@@ -46,18 +71,14 @@ class BrowserFetcher:
     def start(self) -> "BrowserFetcher":
         if self._page is not None:
             return self
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError as exc:  # pragma: no cover - optional dependency
-            raise RuntimeError("Install the 'scraping' extra: pip install -e '.[scraping]'") from exc
-        self._playwright = sync_playwright().start()
+        self._playwright = _acquire_playwright()
         try:
             self._browser = self._playwright.chromium.launch(
                 headless=self.headless, executable_path=self.executable_path
             )
             self._page = self._browser.new_page()
         except BaseException:
-            self._playwright.stop()
+            _release_playwright()
             self._playwright = None
             raise
         return self
@@ -66,7 +87,7 @@ class BrowserFetcher:
         if self._browser is not None:
             self._browser.close()
         if self._playwright is not None:
-            self._playwright.stop()
+            _release_playwright()
         self._playwright = self._browser = self._page = None
 
     def __enter__(self) -> "BrowserFetcher":
@@ -95,7 +116,9 @@ class BrowserFetcher:
             self._page.wait_for_selector(wait_for, timeout=self.timeout_ms)
         html = self._page.content()
         if is_challenge_page(html):
-            raise RuntimeError(f"Still blocked by an anti-bot challenge at {url}; try headless=False")
+            hint = ("try headless=False (--headful)" if self.headless
+                    else "the site demands an interactive challenge, so it cannot be scraped right now")
+            raise RuntimeError(f"Still blocked by an anti-bot challenge at {url}; {hint}")
         return html
 
     # HttpClient fallback interface
