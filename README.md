@@ -255,6 +255,49 @@ transfers, injuries and the expected line-up. ESPN supplies the schedules and
 possession FBref used to, and Understat line-ups stand in for SOFIFA ratings;
 both are collected by `make data` and `make data-lineups`.
 
+### Where an edge hides
+
+If the forecast cannot beat the closing line, an edge can only come from
+*when* and *where* a bet is placed. Seven seasons (2019/20–2025/26, 2,660
+matches) with the model's walk-forward forecasts and every bookmaker's
+opening and closing prices:
+
+* **Betting earlier does not help.** The model trails even the opening line
+  (1X2 Brier 0.581 against Pinnacle's 0.571 opening and 0.568 closing; over
+  2.5: 0.243 against 0.240). Its disagreement with the opening 1X2 line says
+  nothing about where the line closes (correlation 0.03); on totals it does a
+  little (0.09), but the closing line still expects every model bet at
+  opening prices to lose about 2% (negative closing-line value), and the
+  realised returns agree: 1X2 +1% ± 9%, totals −4% ± 5%.
+* **The model adds nothing to price shopping.** With the best market price
+  as the bet, judging value by the model (+1.0%, CLV +0.3%) or a blend with
+  the closing line (+1.7%, CLV +1.1%) is worse than using the closing line
+  alone.
+* **Price shopping against the sharp line is the one positive result.**
+  Take Pinnacle's closing price, de-margined with the power method, as fair
+  value, and bet whichever bookmaker offers a better price (`make
+  backtest-market`, i.e. `--fair market --price max`):
+
+  | EV threshold | Bets | Flat-stake ROI | 95% interval | Mean CLV | p(ROI ≤ 0) |
+  | :--- | :--- | :--- | :--- | :--- | :--- |
+  | 0 | 2,458 | +6.1% | +0.2% to +12.2% | +4.2% | 0.02 |
+  | 2% | 1,800 | +6.9% | −0.9% to +14.6% | +5.4% | 0.04 |
+  | 5% | 770 | +4.8% | −8.5% to +18.2% | +8.1% | 0.25 |
+
+  By season at threshold 0: +27%, +5%, +12%, +1%, −4%, +3%, −1%, with
+  closing-line value falling from +4.4% to +2.3%. The realised return tracks
+  the CLV, which is what a genuine price discrepancy looks like and what the
+  literature reports for this strategy. Three caveats: the "best price" means
+  holding accounts at every bookmaker Football-Data covers and striking the
+  bet at closing time, bookmakers restrict accounts that do this, and the
+  discrepancies are shrinking season by season. It is an edge in the market's
+  own numbers, not in the model's.
+* **De-margining matters for this.** With proportional de-margining the same
+  strategy looked like +5.5% CLV and returned 0%: proportional scaling gives
+  longshots too much probability, so they looked like value. The power (or
+  Shin) method prices favourites higher and the realised return then matches
+  the CLV. The backtest uses the power method throughout.
+
 ## Caveats
 
 * The scrapers follow each site's markup as of writing. They are tested
