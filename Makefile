@@ -28,14 +28,17 @@ data:               ## results, odds (PL + Championship), xG/PPDA, possession, c
 data-fbref:         ## possession and cup fixtures; FBref currently serves a Cloudflare challenge to browsers
 	$(CLI) ingest --sources fbref
 
-data-full: data     ## + starting XIs and SOFIFA ratings (slow: hours on first run, resumable; SOFIFA also behind Cloudflare)
-	$(CLI) ingest --sources understat sofifa --lineups
+data-lineups:       ## starting XIs with each player's xG/xA (one request per match; resumable)
+	$(CLI) ingest --sources understat --lineups --seasons 2022-$(shell date +%Y)
+
+data-full: data data-lineups  ## + SOFIFA ratings (also behind Cloudflare at the moment)
+	$(CLI) ingest --sources sofifa
 
 status:             ## coverage per season, data issues, leakage audit
 	$(CLI) status --audit 20
 
 backtest:           ## tune on the two previous seasons, test on the last completed one
-	$(CLI) backtest --tune --features form --compare $(SEASON_ARG)
+	$(CLI) backtest --tune --features lineup --compare $(SEASON_ARG)
 
 predict:            ## this week's fixtures with probabilities and EV
-	$(CLI) predict --upcoming 7
+	$(CLI) predict --upcoming 7 --features lineup

@@ -96,9 +96,13 @@ def player_form_strength(
     shrinkage towards the league rate over the first ``prior_minutes``.
     ``lineup_score`` is the sum of the eleven starters' values, so it reads as
     the chance creation per 90 of the side that actually started.
-    ``best_xi_score`` is the same sum for the club's best eleven among players
-    who appeared for it in the last ``squad_window_days``, and
-    ``lineup_fraction`` is their ratio: 1 means the strongest available side.
+    ``best_xi_score`` is the same sum for the club's regular XI: the eleven
+    players with the most (decayed) minutes for the club in the last
+    ``squad_window_days``. A benchmark built from the top producers alone would
+    be eleven attackers, which no real side can match; the regular XI keeps
+    the comparison between the side that started and the side that usually
+    does. ``lineup_fraction`` is their ratio: below 1 when regulars are
+    missing, above 1 when a rested star returns.
     Only matches strictly before the kickoff feed a match's values, so the
     output is point-in-time; the first match of a club is still rated (every
     starter at the league rate) and ``matched_starters`` counts the starters
@@ -116,23 +120,24 @@ def player_form_strength(
     frame["minutes"] = frame["minutes"].fillna(0.0).astype(float)
     decay = np.log(2) / (halflife_days * 86400.0)
     prior_90s = prior_minutes / 90.0
+    window = squad_window_days * 86400.0
 
-    # Running decayed totals per player: (contribution, minutes, last update time).
+    # Running decayed totals per player (contribution, minutes, last update) and,
+    # per club, each player's decayed minutes for that club with the last appearance.
     totals: dict[str, list[float]] = {}
-    appearances: dict[str, dict[str, float]] = {}  # team -> player -> last appearance (epoch s)
-    league = [0.0, 0.0, 0.0]  # decayed contribution, minutes, time
+    club_minutes: dict[str, dict[str, list[float]]] = {}
+    league = [0.0, 0.0, 0.0]
 
     def aged(entry: list[float], now: float) -> tuple[float, float]:
         factor = np.exp(-decay * (now - entry[2]))
         return entry[0] * factor, entry[1] * factor
 
-    def value(player: str, now: float, league_rate: float) -> tuple[float, bool]:
+    def rate(player: str, now: float, league_rate: float) -> tuple[float, float]:
         entry = totals.get(player)
         if entry is None:
-            return league_rate, False
+            return league_rate, 0.0
         contrib, minutes = aged(entry, now)
-        nineties = minutes / 90.0
-        return (contrib + prior_90s * league_rate) / (nineties + prior_90s), minutes > 0
+        return (contrib + prior_90s * league_rate) / (minutes / 90.0 + prior_90s), minutes
 
     rows = []
     for kickoff, block in frame.groupby("kickoff", sort=True):
@@ -143,14 +148,17 @@ def player_form_strength(
             starters = team_rows[team_rows["is_starter"].astype(bool)]["player_name"].tolist()
             if not starters:
                 continue
-            values = [value(name, now, league_rate) for name in starters]
+            values = [rate(name, now, league_rate) for name in starters]
             score = float(sum(v for v, _ in values))
-            recent = {
-                name for name, last in appearances.get(team_id, {}).items()
-                if now - last <= squad_window_days * 86400.0
-            } | set(starters)
-            best = sorted((value(name, now, league_rate)[0] for name in recent), reverse=True)[:xi_size]
-            best_xi = float(sum(best)) if len(best) >= min(xi_size, len(starters)) else score
+            regulars = sorted(
+                ((aged(entry, now)[1], name) for name, entry in club_minutes.get(team_id, {}).items()
+                 if now - entry[2] <= window),
+                reverse=True,
+            )[:xi_size]
+            if len(regulars) >= len(starters):
+                best_xi = float(sum(rate(name, now, league_rate)[0] for _, name in regulars))
+            else:
+                best_xi = score  # too little history for a regular XI: no rotation signal yet
             rows.append(
                 {
                     "match_id": match_id,
@@ -158,7 +166,7 @@ def player_form_strength(
                     "lineup_score": score,
                     "best_xi_score": best_xi,
                     "lineup_fraction": score / best_xi if best_xi > 0 else 1.0,
-                    "matched_starters": int(sum(known for _, known in values)),
+                    "matched_starters": int(sum(minutes > 0 for _, minutes in values)),
                 }
             )
         # Update the running totals only after every side at this kickoff is rated.
@@ -166,7 +174,10 @@ def player_form_strength(
             entry = totals.setdefault(row.player_name, [0.0, 0.0, now])
             contrib, minutes = aged(entry, now)
             entry[0], entry[1], entry[2] = contrib + row.contrib, minutes + row.minutes, now
-            appearances.setdefault(row.team_id, {})[row.player_name] = now
+            club = club_minutes.setdefault(row.team_id, {})
+            mine = club.setdefault(row.player_name, [0.0, 0.0, now])
+            _, club_min = aged(mine, now)
+            mine[1], mine[2] = club_min + row.minutes, now
         contrib, minutes = aged(league, now)
         league[0], league[1], league[2] = contrib + block["contrib"].sum(), minutes + block["minutes"].sum(), now
     return pd.DataFrame(rows, columns=columns)

@@ -32,7 +32,8 @@ With real data:
 make check             # is every source reachable and parseable right now?
 make data              # results + odds (PL and Championship), xG/PPDA, possession, cup fixtures (ESPN)
 make data-fbref        # possession and cup fixtures from FBref instead (see the caveat on anti-bot challenges)
-make data-full         # + starting XIs with player xG/xA, SOFIFA ratings (slow on the first run, resumable)
+make data-lineups      # + starting XIs with each player's xG/xA from 2022/23 (about 25 min per season, resumable)
+make data-full         # + SOFIFA ratings (behind Cloudflare at the moment)
 make status            # coverage per season, data issues, leakage audit
 make backtest          # tune ξ and xG weight on the previous season, test on the last one
 make predict           # this week's fixtures: probabilities, EV against current prices
@@ -136,7 +137,8 @@ log μ = c[div]          + attack[away] + defence[home] + θ_att·A(away) + θ_d
   xG is far less noisy than goals. Matches without xG (the Championship) use
   goals only.
 * **Optional covariates.** Standardised features of the scoring side (A) and
-  the conceding side (D). Presets: `none`, `form` (EWMA xG) and `full` (adds
+  the conceding side (D). Presets: `none`, `form` (EWMA xG), `lineup` (the
+  starting XI's form and its fraction of the regular XI) and `full` (EWMA xG,
   fatigue and lineup fraction). `--attack-features` / `--defence-features`
   override them.
 * **Tuning.** `backtest --tune` grid-searches ξ × xG weight by walk-forward
@@ -179,11 +181,12 @@ once with the chosen setup. Otherwise the choice itself leaks test information.
 ## Results on real data
 
 `make backtest` in October 2026: walk-forward over 2025/26 (380 matches,
-weekly refits, ξ and xG weight tuned on 2023/24–2024/25, `form` features):
+weekly refits, ξ and xG weight tuned on 2023/24–2024/25):
 
 | Forecast | Brier | Brier minus closing market | 95% bootstrap interval |
 | :--- | :--- | :--- | :--- |
-| Dixon-Coles, Premier League data only | 0.614 | +0.005 | −0.006 to +0.015 |
+| Dixon-Coles, Premier League data only, `lineup` features | 0.612 | +0.003 | −0.008 to +0.013 |
+| Same with `form` features | 0.614 | +0.005 | −0.006 to +0.015 |
 | Same, trained on both divisions | 0.624 | +0.015 | +0.005 to +0.026 |
 | Closing market (de-margined) | 0.609 | — | — |
 
@@ -198,6 +201,15 @@ rather than a strategy. More seasons would not change this: at the tuned decay
 the fit effectively uses about 530 matches, 94% of them from the last two
 seasons. What the market knows and the model cannot see is squad change:
 transfers, injuries and line-ups.
+
+With ESPN schedules and Understat line-ups loaded (five seasons of starting
+XIs with each player's xG and xA), the same three-season test shows: cup and
+European fixtures in the fatigue index, and possession, change nothing (every
+variant within 0.0005 Brier of the plain model); the starting XI's form
+(`lineup` preset) is the first feature to help on all three seasons, mean
+Brier 0.578 against 0.580 for the plain model and 0.612 against 0.613 on
+2025/26. Small, but it is the one thing the market prices that the team
+ratings do not carry, and `make data-lineups` collects it.
 
 ## Caveats
 

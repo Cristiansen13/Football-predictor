@@ -40,6 +40,7 @@ from .probability import market_probabilities, score_matrices
 FEATURE_PRESETS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "none": ((), ()),
     "form": (("ewma_xg_for",), ("ewma_xg_against",)),
+    "lineup": (("lineup_score", "lineup_fraction"), ("lineup_score", "lineup_fraction")),
     "full": (
         ("ewma_xg_for", "fatigue_penalty", "lineup_fraction"),
         ("ewma_xg_against", "fatigue_penalty", "lineup_fraction"),
