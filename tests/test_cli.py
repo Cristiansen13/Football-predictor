@@ -134,3 +134,28 @@ def test_scan_lists_prices_against_fair_value(tmp_path, capsys, offline):
     for word in ("1x2", "totals", "handicap", "bet365", "pinnacle", "stake_pct"):
         assert word in out, word
     assert " max " not in out  # best-of-market price hidden unless asked
+
+
+def test_shop_evaluates_price_shopping_without_a_model(tmp_path, capsys, offline):
+    main(["--data-dir", str(tmp_path), "ingest", "--seasons", "2023", "--sources", "football_data", "--no-upcoming"])
+    capsys.readouterr()
+    main(["--data-dir", str(tmp_path), "shop", "--seasons", "2023", "--books", "named", "--ev-threshold", "0",
+          "--each-book", "--resamples", "20"])
+    out = capsys.readouterr().out
+    assert "Price shopping, E0 seasons 2023: 10 matches" in out and "closing price of pinnacle (100%" in out
+    assert "Bookmakers (named): bet365, betfair_exchange, bwin, pinnacle, william_hill; exchange commission 5%" in out
+    # Only William Hill's closing home price beats Pinnacle's fair value, on five of the ten fixtures.
+    assert "Per bookmaker" in out and "Each bookmaker on its own" in out
+    bets = pd.read_csv(tmp_path / "reports" / "shopping_2023_named.csv")
+    assert len(bets) == 5 and (bets["bookmaker"] == "william_hill").all() and (bets["selection"] == "home").all()
+    assert (bets["odds"] == 2.25).all() and (bets["ev"] > 0.05).all() and (bets["fair_source"] == "pinnacle").all()
+    assert "market maximum against the best named price" in out
+    # The exchange alone, gross of commission, finds value on the over.
+    main(["--data-dir", str(tmp_path), "shop", "--seasons", "2023", "--books", "exchange", "--commission", "0",
+          "--ev-threshold", "0", "--markets", "totals", "--resamples", "0"])
+    out = capsys.readouterr().out
+    assert "exchange commission 0%" in out
+    bets = pd.read_csv(tmp_path / "reports" / "shopping_2023_exchange.csv")
+    assert len(bets) == 10 and (bets["selection"] == "over").all() and (bets["odds"] == 1.95).all()
+    with pytest.raises(SystemExit, match="unknown bookmaker"):
+        main(["--data-dir", str(tmp_path), "shop", "--seasons", "2023", "--books", "nosuch"])

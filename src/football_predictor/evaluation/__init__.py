@@ -13,7 +13,17 @@ from .backtest import (
     tune_xi,
     walk_forward_predictions,
 )
-from .betting import expected_value, handicap_profit, kelly_fraction
+from .betting import expected_value, handicap_profit, kelly_fraction, net_odds, settle_units
+from .shopping import (
+    BOOK_SETS,
+    ShoppingResult,
+    aggregate_gap,
+    best_prices,
+    price_shopping,
+    reference_probabilities,
+    resolve_books,
+    with_best_prices,
+)
 from .metrics import (
     accuracy,
     bootstrap_interval,
@@ -28,8 +38,18 @@ from .metrics import (
 )
 
 __all__ = [
+    "BOOK_SETS",
     "BacktestResult",
     "BettingStrategy",
+    "ShoppingResult",
+    "aggregate_gap",
+    "best_prices",
+    "net_odds",
+    "price_shopping",
+    "reference_probabilities",
+    "resolve_books",
+    "settle_units",
+    "with_best_prices",
     "accuracy",
     "base_rates",
     "betting_metrics",

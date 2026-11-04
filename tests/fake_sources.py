@@ -61,7 +61,10 @@ def football_data_csv() -> str:
     header = ("Div,Date,Time,HomeTeam,AwayTeam,FTHG,FTAG,FTR,HS,AS,HST,AST,B365H,B365D,B365A,"
               "PSH,PSD,PSA,AvgH,AvgD,AvgA,B365CH,B365CD,B365CA,PSCH,PSCD,PSCA,AvgCH,AvgCD,AvgCA,"
               "B365>2.5,B365<2.5,P>2.5,P<2.5,PC>2.5,PC<2.5,AvgC>2.5,AvgC<2.5,"
-              "AHh,B365AHH,B365AHA,PAHH,PAHA,AHCh,B365CAHH,B365CAHA,PCAHH,PCAHA,MaxCAHH,MaxCAHA")
+              "AHh,B365AHH,B365AHA,PAHH,PAHA,AHCh,B365CAHH,B365CAHA,PCAHH,PCAHA,MaxCAHH,MaxCAHA,"
+              # Named soft books and the exchange (2024/25-style columns), plus the market maximum.
+              "BWH,BWD,BWA,WHH,WHD,WHA,BFEH,BFED,BFEA,BWCH,BWCD,BWCA,WHCH,WHCD,WHCA,BFECH,BFECD,BFECA,"
+              "MaxCH,MaxCD,MaxCA,BFE>2.5,BFE<2.5,BFEC>2.5,BFEC<2.5,BFEAHH,BFEAHA,BFECAHH,BFECAHA")
     lines = [header]
     handicap_lines = [-0.25, 0.0, -0.5, 0.75]
     for row in fixtures().itertuples():
@@ -72,11 +75,15 @@ def football_data_csv() -> str:
                 "1.90,1.95,1.92,1.98,1.88,2.02,1.86,2.00")
         line = handicap_lines[row.Index % len(handicap_lines)]
         handicap = f"{line},1.95,1.95,1.97,1.93,{line},1.93,1.97,1.96,1.94,2.00,1.99"
+        # William Hill closes the home price above Pinnacle's fair value on even rows only.
+        wh_home = 2.25 if row.Index % 2 == 0 else 2.00
+        books = (f"2.12,3.42,3.58,2.09,3.38,3.62,2.16,3.60,3.95,2.06,3.50,3.85,{wh_home},3.50,3.80,2.14,3.70,4.00,"
+                 f"{max(wh_home, 2.14)},3.70,4.00,1.93,2.00,1.95,2.05,1.96,1.96,1.99,1.98")
         lines.append(
             f"E0,{row.kickoff:%d/%m/%Y},{row.kickoff:%H:%M},{CLUBS[row.home]['fd']},{CLUBS[row.away]['fd']},"
-            f"{int(row.home_goals)},{int(row.away_goals)},{ftr},12,9,5,3,{odds},{handicap}"
+            f"{int(row.home_goals)},{int(row.away_goals)},{ftr},12,9,5,3,{odds},{handicap},{books}"
         )
-    return "\n".join(lines) + "\n,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n"  # trailing blank row like the real files
+    return "\n".join(lines) + "\n" + "," * 79 + "\n"  # trailing blank row like the real files
 
 
 # Championship: two known clubs under Football-Data spellings, one abbreviated

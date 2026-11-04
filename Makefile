@@ -47,5 +47,9 @@ backtest-rolling:   ## one walk-forward across several seasons, reported overall
 backtest-market:    ## price-shopping benchmark: Pinnacle closing as fair value, bet the best price across bookmakers
 	$(CLI) backtest --features lineup --xi 0.003 --xg-weight 0.6 --fair market --price max --ev-threshold 0.02 --test-seasons 2019-2025
 
+BOOKS ?= named
+shop:               ## the same benchmark without a model, over the bookmakers Football-Data names (BOOKS=max|named|soft|exchange|list)
+	$(CLI) shop --seasons 2019-2025 --books $(BOOKS) --ev-threshold 0.02 --each-book
+
 predict:            ## this week's fixtures with probabilities and EV
 	$(CLI) predict --upcoming 7 --features lineup

@@ -437,16 +437,24 @@ class Database:
 
     def load_prices(self, match_ids) -> dict[str, pd.DataFrame]:
         """Every stored price for the given fixtures: {'1x2', 'totals', 'handicap'} long frames."""
-        ids = list(match_ids)
-        if not ids:
-            empty = pd.DataFrame()
-            return {"1x2": empty, "totals": empty, "handicap": empty}
-        marks = ", ".join("?" * len(ids))
-        return {
-            "1x2": self.query(f"SELECT * FROM odds WHERE match_id IN ({marks})", ids),
-            "totals": self.query(f"SELECT * FROM totals_odds WHERE match_id IN ({marks}) AND line = 2.5", ids),
-            "handicap": self.query(f"SELECT * FROM handicap_odds WHERE match_id IN ({marks})", ids),
-        }
+        ids = list(dict.fromkeys(match_ids))
+        tables = {"1x2": ("odds", ""), "totals": ("totals_odds", " AND line = 2.5"), "handicap": ("handicap_odds", "")}
+        out = {}
+        for key, (table, extra) in tables.items():
+            parts = []
+            for start in range(0, len(ids), 900):  # well inside SQLite's bound-variable limit
+                chunk = ids[start:start + 900]
+                marks = ", ".join("?" * len(chunk))
+                parts.append(self.query(f"SELECT * FROM {table} WHERE match_id IN ({marks}){extra}", chunk))
+            out[key] = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+        return out
+
+    def bookmakers(self) -> list[str]:
+        """Every bookmaker with a stored price, in any market."""
+        names = set()
+        for table in ("odds", "totals_odds", "handicap_odds"):
+            names |= set(self.query(f"SELECT DISTINCT bookmaker FROM {table}")["bookmaker"])
+        return sorted(names)
 
     def upsert_player_ratings(self, frame: pd.DataFrame) -> None:
         self._upsert("player_ratings", ["player_id", "snapshot_date"], frame)

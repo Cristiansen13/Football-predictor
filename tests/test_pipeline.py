@@ -268,8 +268,10 @@ def test_dataset_carries_opening_and_best_prices():
     played = data[data["home_goals"].notna() & (data["division"] == "E0")]
     assert played["open_home"].notna().all() and played["open_over_2_5"].notna().all()
     assert (played["open_home"] != played["odds_home"]).any()  # opening differs from closing
-    assert "max_home" in data and "max_over_2_5" in data  # the toy files carry no Max columns, so NaN
-    assert played["max_home"].isna().all()
+    assert "max_home" in data and "max_over_2_5" in data
+    # The toy file carries the market maximum for 1X2 closing only: it is the best named price there, NaN elsewhere.
+    assert played["max_home"].notna().all() and played["max_over_2_5"].isna().all()
+    assert (played["max_home"] >= played["odds_home"]).all() and set(played["max_home"]) == {2.25, 2.14}
 
 
 def test_dataset_carries_handicap_lines_and_prices():

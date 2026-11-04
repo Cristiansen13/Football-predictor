@@ -16,7 +16,7 @@ import pandas as pd
 
 from ..models.dixon_coles import DixonColesModel
 from ..models.probability import handicap_effective_probabilities, score_matrices
-from .betting import expected_value, handicap_profit, kelly_fraction
+from .betting import expected_value, kelly_fraction, settle_units
 from .metrics import (
     accuracy,
     binary_brier,
@@ -405,19 +405,14 @@ def _selection_frame(
 
 def _profit_units(selection_index: np.ndarray, frame: pd.DataFrame, odds: np.ndarray, lines: np.ndarray) -> np.ndarray:
     """Profit per unit stake of each bet once settled (pushes return the stake)."""
-    outcome = frame["outcome"].to_numpy()
-    over = frame["over"].to_numpy() if "over" in frame else np.zeros(len(frame), dtype=int)
-    won_1x2 = selection_index == outcome
-    won_totals = np.where(selection_index == 3, over == 1, over == 0)
-    simple = np.where(np.where(selection_index < 3, won_1x2, won_totals), odds - 1.0, -1.0)
-    is_handicap = selection_index >= 5
-    units = simple.astype(float)
-    if is_handicap.any():
-        side = np.where(selection_index == 5, 1.0, -1.0)
-        units = np.where(is_handicap, handicap_profit(frame["home_goals"].to_numpy(dtype=float),
-                                                      frame["away_goals"].to_numpy(dtype=float), lines, odds, side),
-                         units)
-    return units
+    goals = {c: frame[c].to_numpy(dtype=float) for c in ("home_goals", "away_goals") if c in frame}
+    return settle_units(
+        selection_index, odds,
+        home_goals=goals.get("home_goals"), away_goals=goals.get("away_goals"),
+        outcome=frame["outcome"].to_numpy() if "outcome" in frame else None,
+        over=frame["over"].to_numpy() if "over" in frame else None,
+        line=lines,
+    )
 
 
 def simulate_betting(

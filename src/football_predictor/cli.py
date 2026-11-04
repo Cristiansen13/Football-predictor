@@ -5,7 +5,9 @@
     status         data coverage per season, quality issues, point-in-time audit
     ratings        fit the model and print team strengths
     predict        probabilities (and EV against current odds) for fixtures
+    scan           value board: every bookmaker's price on the coming fixtures against a fair value
     backtest       walk-forward test season: scoring rules, calibration, EV betting
+    shop           price shopping without a model: the sharp closing line as fair value, bet where a bookmaker beats it
     demo           backtest on a simulated league (no network needed)
 """
 
@@ -27,17 +29,24 @@ from .config import Settings, season_from_date
 from .db import Database
 from .etl.browser import BrowserFetcher
 from .etl.entity_resolution import team_resolver
+from .etl.football_data import AGGREGATES
 from .etl.http import HttpClient
 from .etl.pipeline import DIVISIONS, SOURCES, Pipeline, probe_sources
 from .evaluation import (
     BettingStrategy,
+    aggregate_gap,
+    best_prices,
     expected_value,
     kelly_fraction,
+    price_shopping,
+    resolve_books,
     run_backtest,
     save_report,
     tune_hyperparameters,
+    with_best_prices,
 )
 from .evaluation.backtest import BacktestResult, evaluate_forecasts
+from .evaluation.shopping import EXCHANGE, net_exchange
 from .features import audit_point_in_time, build_features, lineup_strength, player_form_strength
 from .models import FEATURE_PRESETS, DixonColesModel
 from .quality import coverage_report, validate
@@ -336,7 +345,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
     lam, mu = forecast["exp_home_goals"].to_numpy(dtype=float), forecast["exp_away_goals"].to_numpy(dtype=float)
     grids = score_matrices(lam, mu, model.rho_, model.max_goals)
     db = Database(args.db)
-    prices = db.load_prices(fixtures["match_id"])
+    prices = net_exchange(db.load_prices(fixtures["match_id"]), args.commission)
     db.close()
     teams = fixtures.set_index("match_id")[["kickoff", "home_team", "away_team"]]
     index = {m: i for i, m in enumerate(fixtures["match_id"])}
@@ -390,6 +399,99 @@ def cmd_scan(args: argparse.Namespace) -> None:
         print(board.head(10).round(3).to_string(index=False))
     else:
         print(shown.round(3).to_string(index=False))
+
+
+# -- price shopping without a model ---------------------------------------------
+
+
+def _stored_books(prices: dict[str, pd.DataFrame]) -> list[str]:
+    names: set[str] = set()
+    for frame in prices.values():
+        if frame is not None and not frame.empty:
+            names |= set(frame["bookmaker"])
+    return sorted(names)
+
+
+def _shop_table(table: pd.DataFrame, key: str | None = None) -> str:
+    """A shopping summary with returns, intervals, closing-line value and hit rate in percent."""
+    if table.empty:
+        return "(no bets)"
+    shown = table.copy()
+    for column in ("flat_stake_roi", "flat_roi_ci_low", "flat_roi_ci_high", "mean_clv", "hit_rate"):
+        if column in shown:
+            shown[column] = (100 * shown[column]).round(1)
+    shown = shown.rename(columns={"flat_stake_roi": "roi_%", "flat_roi_ci_low": "ci_low_%",
+                                  "flat_roi_ci_high": "ci_high_%", "p_flat_roi_le_zero": "p_le_0",
+                                  "mean_clv": "clv_%", "hit_rate": "hit_%"})
+    order = ["fixtures_priced", "bets", "roi_%", "ci_low_%", "ci_high_%", "p_le_0", "clv_%", "hit_%", "mean_odds"]
+    columns = ([key] if key else []) + [c for c in order if c in shown]
+    return shown[columns].round(3).to_string(index=False)
+
+
+def _indent(text: str) -> str:
+    return "  " + text.replace("\n", "\n  ")
+
+
+def cmd_shop(args: argparse.Namespace) -> None:
+    """Price shopping without a model: the sharp closing line as fair value, the bet wherever a bookmaker beats it."""
+    db = Database(args.db)
+    matches = db.load_match_dataset()
+    matches = matches[(matches["division"] == args.division) & matches["home_goals"].notna()]
+    if matches.empty:
+        db.close()
+        raise SystemExit(f"No played {args.division} matches in {args.db}; run `football-predictor ingest` first")
+    seasons = parse_seasons(args.seasons) if args.seasons else list(range(2019, default_test_season(matches, args.division) + 1))
+    matches = matches[matches["season"].isin(seasons)]
+    if matches.empty:
+        db.close()
+        raise SystemExit(f"No played {args.division} matches in seasons {args.seasons}")
+    prices = db.load_prices(matches["match_id"])
+    db.close()
+    available = _stored_books(prices)
+    try:
+        books = resolve_books(args.books, available)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+    kwargs = dict(fair_book=args.fair_book, strict_fair=args.strict_fair, markets=tuple(args.markets),
+                  ev_threshold=args.ev_threshold, commission=args.commission, max_odds=args.max_odds,
+                  one_per_match=not args.all_selections, n_resamples=args.resamples)
+    result = price_shopping(matches, prices, books=books, **kwargs)
+    label = f"{min(seasons)}" if len(seasons) == 1 else f"{min(seasons)}-{max(seasons)}"
+    c = result.coverage
+    fallback = "skipped" if args.strict_fair else "judged by the next reference price"
+    print(f"Price shopping, {args.division} seasons {label}: {c['matches']} matches. Fair value: the de-margined "
+          f"closing price of {args.fair_book} ({100 * c['share_fair_from_book']:.0f}% of fixtures; the rest {fallback}). "
+          f"Bet where a bookmaker beats it by more than {args.ev_threshold:+.1%}, "
+          f"{'every such selection' if args.all_selections else 'the best selection per fixture'}, "
+          f"markets {','.join(args.markets)}, flat stakes.")
+    exchange = f"; exchange commission {args.commission:.0%}" if EXCHANGE in books else ""
+    print(f"Bookmakers ({args.books}): {', '.join(books)}{exchange}")
+    print("  Overall")
+    print(_indent(_shop_table(pd.DataFrame([result.metrics]))))
+    for title, table, key in (("Per season", result.by_season, "season"), ("Per market", result.by_market, "market"),
+                              ("Per bookmaker (the one whose price was taken)", result.by_bookmaker, "bookmaker")):
+        if not table.empty and (key != "bookmaker" or len(books) > 1):
+            print(f"  {title}")
+            print(_indent(_shop_table(table, key)))
+    named = [b for b in available if b not in AGGREGATES]
+    if books != ["max"] and named:
+        gap = aggregate_gap(prices, named)
+        if gap.get("selections"):
+            print(f"  Football-Data's market maximum against the best named price on 1X2 closing: {gap['mean_gap']:+.2%} "
+                  f"on average; above every named bookmaker on {gap['share_unlisted_best']:.0%} of selections, "
+                  f"by more than 1% on {gap['share_gap_over_1pct']:.0%}")
+    if args.each_book:
+        rows = []
+        for book in named:
+            single = price_shopping(matches, prices, books=[book], **kwargs)
+            rows.append({"bookmaker": book, "fixtures_priced": single.coverage["matches_with_price"], **single.metrics})
+        print("  Each bookmaker on its own")
+        print(_indent(_shop_table(pd.DataFrame(rows), "bookmaker")))
+    reports = Path(args.reports_dir)
+    reports.mkdir(parents=True, exist_ok=True)
+    path = reports / f"shopping_{label}_{args.books.replace(',', '+')}.csv"
+    result.bets.to_csv(path, index=False)
+    print(f"Bets: {path}")
 
 
 METRIC_SECTIONS = {
@@ -481,8 +583,37 @@ def default_test_season(data: pd.DataFrame, division: str) -> int:
     return int(complete.max() if len(complete) else rows["season"].max())
 
 
+BET_BOOK_COLUMNS = {"home": "book_home", "draw": "book_draw", "away": "book_away", "over": "book_over_2_5",
+                    "under": "book_under_2_5", "ah_home": "book_ah_home", "ah_away": "book_ah_away"}
+
+
+def _bet_bookmakers(bets: pd.DataFrame, data: pd.DataFrame) -> list[str]:
+    """Which bookmaker's price each bet was struck at, from the dataset's best-price columns."""
+    lookup = data.drop_duplicates("match_id").set_index("match_id")
+    out = []
+    for match_id, selection in zip(bets["match_id"], bets["selection"]):
+        column = BET_BOOK_COLUMNS[selection]
+        value = lookup.at[match_id, column] if match_id in lookup.index and column in lookup else None
+        out.append("" if value is None or (isinstance(value, float) and np.isnan(value)) else str(value))
+    return out
+
+
 def cmd_backtest(args: argparse.Namespace) -> None:
     data = load_features(args)
+    books = None
+    if args.books:
+        if args.price != "max":
+            raise SystemExit("--books chooses whose prices the best price is taken over: use it with --price max")
+        if args.synthetic:
+            raise SystemExit("--books needs stored prices; the simulated league has none")
+        db = Database(args.db)
+        prices = db.load_prices(data["match_id"])
+        db.close()
+        try:
+            books = resolve_books(args.books, _stored_books(prices))
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
+        data = with_best_prices(data, best_prices(prices, books, commission=args.commission))
     divisions = [args.division]
     if args.test_seasons:
         test_seasons = parse_seasons(args.test_seasons)
@@ -545,8 +676,15 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     )
     print(f"Test {'season' if label == str(test_season) else 'seasons'} {label} ({args.division}) | "
           f"xi={args.xi} | xg_weight={args.xg_weight} | features={args.features} | "
-          f"markets={','.join(args.markets)} | fair={args.fair} | price={args.price}")
+          f"markets={','.join(args.markets)} | fair={args.fair} | price={args.price}"
+          + (f" | books={args.books} ({', '.join(books)})" if books else ""))
     print_metrics(result.metrics)
+    if books and not result.bets.empty:
+        result.bets["bookmaker"] = _bet_bookmakers(result.bets, data)
+        print("  Per bookmaker (the one whose price was taken)")
+        table = result.bets.groupby("bookmaker").agg(bets=("units", "size"), flat_stake_roi=("units", "mean"),
+                                                     clv=("clv", "mean")).reset_index()
+        print(table.round(4).to_string(index=False))
     if last_season != test_season:
         print("  Per season")
         print(season_breakdown(result).round(4).to_string(index=False))
@@ -646,7 +784,31 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--ev-threshold", type=float, default=0.0, help="show prices with EV above this")
     scan.add_argument("--kelly", type=float, default=0.25, help="fraction of full Kelly for stake_pct")
     scan.add_argument("--include-max", action="store_true", help="also list the best-of-market price")
+    scan.add_argument("--commission", type=float, default=0.05, help="Betfair Exchange commission on winnings")
     scan.set_defaults(func=cmd_scan, home=None, away=None)
+
+    shop = sub.add_parser("shop", help="price shopping without a model: the sharp closing line as fair value, "
+                                       "bet wherever a bookmaker beats it")
+    shop.add_argument("--seasons", default=None, metavar="RANGE",
+                      help="seasons to evaluate (default: 2019 to the last completed season)")
+    shop.add_argument("--division", default="E0")
+    shop.add_argument("--markets", nargs="+", choices=["1x2", "totals", "handicap"],
+                      default=["1x2", "totals", "handicap"])
+    shop.add_argument("--books", default="named",
+                      help="bookmakers whose prices are shopped: max (Football-Data's market maximum), named "
+                           "(every bookmaker it lists), soft (named without Pinnacle and the exchange), exchange, "
+                           "or a comma-separated list (default: named)")
+    shop.add_argument("--fair-book", default="pinnacle",
+                      help="whose closing price is the fair value (default: pinnacle, then the market average)")
+    shop.add_argument("--strict-fair", action="store_true", help="skip fixtures the fair bookmaker does not price")
+    shop.add_argument("--ev-threshold", type=float, default=0.02)
+    shop.add_argument("--commission", type=float, default=0.05, help="Betfair Exchange commission on winnings")
+    shop.add_argument("--max-odds", type=float, default=15.0)
+    shop.add_argument("--all-selections", action="store_true",
+                      help="bet every selection above the threshold, not only the best one per fixture")
+    shop.add_argument("--each-book", action="store_true", help="also evaluate every named bookmaker on its own")
+    shop.add_argument("--resamples", type=int, default=2000, help="bootstrap resamples for the intervals")
+    shop.set_defaults(func=cmd_shop)
 
     for name, help_text in (("backtest", "walk-forward backtest with EV betting"),
                             ("demo", "backtest on a simulated league (no network needed)")):
@@ -668,6 +830,10 @@ def build_parser() -> argparse.ArgumentParser:
         bt.add_argument("--price", choices=["closing", "opening", "max"], default="closing",
                         help="price to bet at: the closing reference, the earliest listed price, or the best "
                              "price across bookmakers (default: closing)")
+        bt.add_argument("--books", default=None,
+                        help="with --price max: take the best price over these bookmakers instead of Football-Data's "
+                             "market maximum (named, soft, exchange, or a comma-separated list)")
+        bt.add_argument("--commission", type=float, default=0.05, help="Betfair Exchange commission on winnings")
         bt.add_argument("--tune", "--tune-xi", dest="tune", action="store_true",
                         help="pick xi and xg_weight on the seasons before the test season")
         bt.add_argument("--tune-seasons", type=int, default=2, metavar="N",

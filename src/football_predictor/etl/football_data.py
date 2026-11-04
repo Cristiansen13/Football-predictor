@@ -18,42 +18,98 @@ CSV_URL = "https://www.football-data.co.uk/mmz4281/{code}/{division}.csv"
 FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
 ODDS_FIELDS = ["season", "home_team", "away_team", "bookmaker", "market_time", "home", "draw", "away"]
 
-# bookmaker -> market time -> (home, draw, away) column names. Closing odds were
-# added in 2012/13 for Pinnacle and in 2019/20 for the market average; older
-# files publish the average as BbAv*.
-ODDS_COLUMNS = {
-    "pinnacle": {"closing": ("PSCH", "PSCD", "PSCA"), "opening": ("PSH", "PSD", "PSA")},
-    "average": {"closing": ("AvgCH", "AvgCD", "AvgCA"), "opening": ("AvgH", "AvgD", "AvgA")},
-    "average_legacy": {"opening": ("BbAvH", "BbAvD", "BbAvA")},
-    "bet365": {"closing": ("B365CH", "B365CD", "B365CA"), "opening": ("B365H", "B365D", "B365A")},
-    "max": {"closing": ("MaxCH", "MaxCD", "MaxCA"), "opening": ("MaxH", "MaxD", "MaxA")},
+# Football-Data's column prefix for each bookmaker (its notes.txt). A 1X2 price
+# is ``<prefix>H/D/A`` before closing and ``<prefix>CH/CD/CA`` at closing; the
+# other markets follow the same rule (``P>2.5`` / ``PC>2.5``, ``PAHH`` /
+# ``PCAHH``). Closing prices exist from 2019/20, Pinnacle's 1X2 closing price
+# from 2012/13. Pinnacle is ``PS`` on 1X2 and ``P`` elsewhere; VC Bet became
+# BetVictor (``BV``) and the two codes never share a file. ``Max`` and ``Avg``
+# are the market maximum and average over every bookmaker Football-Data
+# follows, listed by name or not; before 2019/20 they are Betbrain's
+# ``BbMx`` / ``BbAv``, pre-closing only. Which bookmakers a file names changes
+# from season to season (six in 2019/20, ten in 2025/26, Pinnacle dropped in
+# 2026/27), so columns that are absent are simply skipped. Order matters for
+# duplicates: the first prefix of a bookmaker wins.
+BOOKMAKERS = {
+    "B365": "bet365",
+    "PS": "pinnacle",
+    "P": "pinnacle",
+    "BW": "bwin",
+    "IW": "interwetten",
+    "WH": "william_hill",
+    "VC": "betvictor",
+    "BV": "betvictor",
+    "LB": "ladbrokes",
+    "SJ": "stan_james",
+    "GB": "gamebookers",
+    "BS": "blue_square",
+    "SB": "sportingbet",
+    "SO": "sporting_odds",
+    "SY": "stanleybet",
+    "BF": "betfair",
+    "BFE": "betfair_exchange",
+    "1XB": "1xbet",
+    "BFD": "betfred",
+    "BMGM": "betmgm",
+    "CL": "coral",
+    "PP": "paddy_power",
+    "SKB": "skybet",  # not in Football-Data's notes yet; Sky Bet by its code
+    "Max": "max",
+    "Avg": "average",
+    "BbMx": "max",
+    "BbAv": "average",
 }
+# Bookmakers that are not a single counterparty: the market maximum (no one
+# account can take every best price) and the market average.
+AGGREGATES = ("max", "average")
 
-# Over/under 2.5 goals: bookmaker -> market time -> (over, under) columns. Before
-# 2019/20 the files carry only the Betbrain market max and average, opening only.
+
+def _is_legacy(prefix: str) -> bool:
+    return prefix.startswith("Bb")
+
+
+def odds_specs() -> list[tuple[str, str, tuple[str, str, str]]]:
+    """(bookmaker, market time, (home, draw, away) columns) for every 1X2 price."""
+    specs = []
+    for prefix, bookmaker in BOOKMAKERS.items():
+        specs.append((bookmaker, "opening", (f"{prefix}H", f"{prefix}D", f"{prefix}A")))
+        if not _is_legacy(prefix):
+            specs.append((bookmaker, "closing", (f"{prefix}CH", f"{prefix}CD", f"{prefix}CA")))
+    return specs
+
+
+# Over/under 2.5 goals. Before 2019/20 the files carry only Betbrain's market
+# maximum and average, pre-closing only.
 TOTALS_LINE = 2.5
-TOTALS_COLUMNS = {
-    "pinnacle": {"closing": ("PC>2.5", "PC<2.5"), "opening": ("P>2.5", "P<2.5")},
-    "average": {"closing": ("AvgC>2.5", "AvgC<2.5"), "opening": ("Avg>2.5", "Avg<2.5")},
-    "average_legacy": {"opening": ("BbAv>2.5", "BbAv<2.5")},
-    "bet365": {"closing": ("B365C>2.5", "B365C<2.5"), "opening": ("B365>2.5", "B365<2.5")},
-    "max": {"closing": ("MaxC>2.5", "MaxC<2.5"), "opening": ("Max>2.5", "Max<2.5")},
-    "max_legacy": {"opening": ("BbMx>2.5", "BbMx<2.5")},
-}
 TOTALS_FIELDS = ["season", "home_team", "away_team", "bookmaker", "market_time", "line", "over", "under"]
 
-# Asian handicap: bookmaker -> market time -> (line, home, away) columns. The
-# line is the home side's handicap (-0.5: home gives half a goal). Opening and
-# closing have their own lines; before 2019/20 only Betbrain opening prices.
-HANDICAP_COLUMNS = {
-    "pinnacle": {"closing": ("AHCh", "PCAHH", "PCAHA"), "opening": ("AHh", "PAHH", "PAHA")},
-    "average": {"closing": ("AHCh", "AvgCAHH", "AvgCAHA"), "opening": ("AHh", "AvgAHH", "AvgAHA")},
-    "average_legacy": {"opening": ("BbAHh", "BbAvAHH", "BbAvAHA")},
-    "bet365": {"closing": ("AHCh", "B365CAHH", "B365CAHA"), "opening": ("AHh", "B365AHH", "B365AHA")},
-    "max": {"closing": ("AHCh", "MaxCAHH", "MaxCAHA"), "opening": ("AHh", "MaxAHH", "MaxAHA")},
-    "max_legacy": {"opening": ("BbAHh", "BbMxAHH", "BbMxAHA")},
-}
+
+def totals_specs() -> list[tuple[str, str, tuple[str, str]]]:
+    """(bookmaker, market time, (over, under) columns) for every over/under 2.5 price."""
+    specs = []
+    for prefix, bookmaker in BOOKMAKERS.items():
+        specs.append((bookmaker, "opening", (f"{prefix}>2.5", f"{prefix}<2.5")))
+        if not _is_legacy(prefix):
+            specs.append((bookmaker, "closing", (f"{prefix}C>2.5", f"{prefix}C<2.5")))
+    return specs
+
+
+# Asian handicap. The line is the home side's handicap (-0.5: home gives half a
+# goal); every bookmaker's price in a file refers to the same line (``AHh``
+# before closing, ``AHCh`` at closing; Betbrain's ``BbAHh`` before 2019/20).
 HANDICAP_FIELDS = ["season", "home_team", "away_team", "bookmaker", "market_time", "line", "home", "away"]
+
+
+def handicap_specs() -> list[tuple[str, str, tuple[str, str, str]]]:
+    """(bookmaker, market time, (line, home, away) columns) for every handicap price."""
+    specs = []
+    for prefix, bookmaker in BOOKMAKERS.items():
+        line = "BbAHh" if _is_legacy(prefix) else "AHh"
+        specs.append((bookmaker, "opening", (line, f"{prefix}AHH", f"{prefix}AHA")))
+        if not _is_legacy(prefix):
+            specs.append((bookmaker, "closing", ("AHCh", f"{prefix}CAHH", f"{prefix}CAHA")))
+    return specs
+
 
 STAT_COLUMNS = {
     "HS": "home_shots",
@@ -73,8 +129,8 @@ def fetch_fixtures_csv(client: HttpClient) -> str:
 
 
 def _read_csv(csv_text: str) -> pd.DataFrame:
-    frame = pd.read_csv(io.StringIO(csv_text.lstrip("\ufeff")), on_bad_lines="skip")
-    frame.columns = frame.columns.astype(str).str.strip().str.lstrip("\ufeffï»¿")
+    frame = pd.read_csv(io.StringIO(csv_text.lstrip("﻿")), on_bad_lines="skip")
+    frame.columns = frame.columns.astype(str).str.strip().str.lstrip("﻿ï»¿")
     frame = frame.loc[:, ~frame.columns.str.startswith("Unnamed")]
     return frame.dropna(subset=["HomeTeam", "AwayTeam"])
 
@@ -87,67 +143,47 @@ def _kickoff(frame: pd.DataFrame) -> pd.Series:
     return date
 
 
-def _odds_long(raw: pd.DataFrame, matches: pd.DataFrame) -> pd.DataFrame:
+def _prices_long(
+    raw: pd.DataFrame,
+    matches: pd.DataFrame,
+    specs,
+    names: list[str],
+    fields: list[str],
+    constants: dict | None = None,
+) -> pd.DataFrame:
+    """Stack the price columns of every (bookmaker, market time) present in ``raw``."""
+    constants = constants or {}
     frames = []
-    for bookmaker, markets in ODDS_COLUMNS.items():
-        for market_time, columns in markets.items():
-            if not all(c in raw for c in columns):
-                continue
-            block = raw[list(columns)].apply(pd.to_numeric, errors="coerce")
-            block.columns = ["home", "draw", "away"]
-            block.insert(0, "market_time", market_time)
-            block.insert(0, "bookmaker", bookmaker.removesuffix("_legacy"))
-            block.insert(0, "away_team", matches["away_team"].to_numpy())
-            block.insert(0, "home_team", matches["home_team"].to_numpy())
-            block.insert(0, "season", matches["season"].to_numpy())
-            frames.append(block.dropna(subset=["home", "draw", "away"]))
+    for bookmaker, market_time, columns in specs:
+        if not all(c in raw for c in columns):
+            continue
+        block = raw[list(columns)].apply(pd.to_numeric, errors="coerce")
+        block.columns = names
+        for column, value in constants.items():
+            block.insert(0, column, value)
+        block.insert(0, "market_time", market_time)
+        block.insert(0, "bookmaker", bookmaker)
+        block.insert(0, "away_team", matches["away_team"].to_numpy())
+        block.insert(0, "home_team", matches["home_team"].to_numpy())
+        block.insert(0, "season", matches["season"].to_numpy())
+        frames.append(block.dropna(subset=names))
     if not frames:
-        return pd.DataFrame(columns=ODDS_FIELDS)
-    odds = pd.concat(frames, ignore_index=True)
-    return odds.drop_duplicates(["season", "home_team", "away_team", "bookmaker", "market_time"]).reset_index(drop=True)
+        return pd.DataFrame(columns=fields)
+    long = pd.concat(frames, ignore_index=True)
+    keys = ["season", "home_team", "away_team", "bookmaker", "market_time"] + [c for c in ("line",) if c in constants]
+    return long.drop_duplicates(keys).reset_index(drop=True)
+
+
+def _odds_long(raw: pd.DataFrame, matches: pd.DataFrame) -> pd.DataFrame:
+    return _prices_long(raw, matches, odds_specs(), ["home", "draw", "away"], ODDS_FIELDS)
 
 
 def _totals_long(raw: pd.DataFrame, matches: pd.DataFrame) -> pd.DataFrame:
-    frames = []
-    for bookmaker, markets in TOTALS_COLUMNS.items():
-        for market_time, columns in markets.items():
-            if not all(c in raw for c in columns):
-                continue
-            block = raw[list(columns)].apply(pd.to_numeric, errors="coerce")
-            block.columns = ["over", "under"]
-            block.insert(0, "line", TOTALS_LINE)
-            block.insert(0, "market_time", market_time)
-            block.insert(0, "bookmaker", bookmaker.removesuffix("_legacy"))
-            block.insert(0, "away_team", matches["away_team"].to_numpy())
-            block.insert(0, "home_team", matches["home_team"].to_numpy())
-            block.insert(0, "season", matches["season"].to_numpy())
-            frames.append(block.dropna(subset=["over", "under"]))
-    if not frames:
-        return pd.DataFrame(columns=TOTALS_FIELDS)
-    totals = pd.concat(frames, ignore_index=True)
-    keys = ["season", "home_team", "away_team", "bookmaker", "market_time", "line"]
-    return totals.drop_duplicates(keys).reset_index(drop=True)
+    return _prices_long(raw, matches, totals_specs(), ["over", "under"], TOTALS_FIELDS, {"line": TOTALS_LINE})
 
 
 def _handicaps_long(raw: pd.DataFrame, matches: pd.DataFrame) -> pd.DataFrame:
-    frames = []
-    for bookmaker, markets in HANDICAP_COLUMNS.items():
-        for market_time, columns in markets.items():
-            if not all(c in raw for c in columns):
-                continue
-            block = raw[list(columns)].apply(pd.to_numeric, errors="coerce")
-            block.columns = ["line", "home", "away"]
-            block.insert(0, "market_time", market_time)
-            block.insert(0, "bookmaker", bookmaker.removesuffix("_legacy"))
-            block.insert(0, "away_team", matches["away_team"].to_numpy())
-            block.insert(0, "home_team", matches["home_team"].to_numpy())
-            block.insert(0, "season", matches["season"].to_numpy())
-            frames.append(block.dropna(subset=["line", "home", "away"]))
-    if not frames:
-        return pd.DataFrame(columns=HANDICAP_FIELDS)
-    handicaps = pd.concat(frames, ignore_index=True)
-    keys = ["season", "home_team", "away_team", "bookmaker", "market_time"]
-    return handicaps.drop_duplicates(keys).reset_index(drop=True)
+    return _prices_long(raw, matches, handicap_specs(), ["line", "home", "away"], HANDICAP_FIELDS)
 
 
 def parse_season_handicaps(csv_text: str, season: int, division: str = "E0") -> pd.DataFrame:

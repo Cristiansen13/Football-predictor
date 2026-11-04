@@ -17,10 +17,34 @@ def test_football_data_results_and_odds():
     assert (first["home_goals"], first["away_goals"]) == (1, 2)
     assert first["home_shots"] == 12 and first["away_shots_on_target"] == 3
 
-    assert set(odds["bookmaker"]) == {"pinnacle", "average", "bet365"}
+    assert set(odds["bookmaker"]) == {"pinnacle", "average", "bet365", "bwin", "william_hill", "betfair_exchange",
+                                      "max"}
     closing = odds[(odds["bookmaker"] == "pinnacle") & (odds["market_time"] == "closing")].iloc[0]
     assert (closing["home"], closing["draw"], closing["away"]) == (2.08, 3.55, 3.90)
-    assert len(odds) == 10 * 6
+    assert len(odds) == 10 * 13  # six books opening and closing, the market maximum closing only
+    exchange = odds[(odds["bookmaker"] == "betfair_exchange") & (odds["market_time"] == "closing")]
+    assert len(exchange) == 10 and exchange.iloc[0]["away"] == 4.00
+
+
+def test_football_data_bookmaker_codes_across_file_generations():
+    """Every prefix Football-Data has used resolves, closing columns follow the C rule,
+    VC Bet and BetVictor are one bookmaker, and the legacy Betbrain columns are pre-closing only."""
+    header = ("Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,VCH,VCD,VCA,BVH,BVD,BVA,BVCH,BVCD,BVCA,SKBH,SKBD,SKBA,"
+              "BbMxH,BbMxD,BbMxA,BbAvH,BbAvD,BbAvA,BbMx>2.5,BbMx<2.5,BbAHh,BbMxAHH,BbMxAHA,PH,PD,PA")
+    row = ("E0,19/08/17,Watford,Liverpool,3,3,2.0,3.0,4.0,2.1,3.1,4.1,2.2,3.2,4.2,2.3,3.3,4.3,2.4,3.4,4.4,"
+           "2.5,3.5,4.5,1.9,1.9,-0.5,1.95,1.95,2.6,3.6,4.6")
+    matches, odds = football_data.parse_season(f"{header}\n{row}\n", 2017)
+    by_book = odds.set_index(["bookmaker", "market_time"])
+    assert by_book.loc[("betvictor", "opening"), "home"] == 2.0  # VC wins over BV when both are present
+    assert by_book.loc[("betvictor", "closing"), "home"] == 2.2
+    assert by_book.loc[("skybet", "opening"), "home"] == 2.3
+    assert by_book.loc[("max", "opening"), "home"] == 2.4 and by_book.loc[("average", "opening"), "home"] == 2.5
+    assert by_book.loc[("pinnacle", "opening"), "home"] == 2.6  # the P prefix on 1X2
+    assert "closing" not in odds[odds["bookmaker"] == "max"]["market_time"].tolist()
+    totals = football_data.parse_season_totals(f"{header}\n{row}\n", 2017)
+    assert totals.iloc[0][["bookmaker", "market_time", "over"]].tolist() == ["max", "opening", 1.9]
+    handicaps = football_data.parse_season_handicaps(f"{header}\n{row}\n", 2017)
+    assert handicaps.iloc[0][["bookmaker", "line", "home"]].tolist() == ["max", -0.5, 1.95]
 
 
 def test_football_data_two_digit_years_without_time():
@@ -145,7 +169,7 @@ def test_espn_scoreboard_and_cup_schedule():
 
 def test_football_data_over_under_prices():
     totals = football_data.parse_season_totals(fake.football_data_csv(), 2023)
-    assert set(totals["bookmaker"]) == {"bet365", "pinnacle", "average"}
+    assert set(totals["bookmaker"]) == {"bet365", "pinnacle", "average", "betfair_exchange"}
     assert set(totals["market_time"]) == {"opening", "closing"} and (totals["line"] == 2.5).all()
     pinnacle_closing = totals[(totals["bookmaker"] == "pinnacle") & (totals["market_time"] == "closing")]
     assert len(pinnacle_closing) == 10 and pinnacle_closing.iloc[0][["over", "under"]].tolist() == [1.88, 2.02]
@@ -157,7 +181,7 @@ def test_football_data_over_under_prices():
 
 def test_football_data_asian_handicap_prices():
     handicaps = football_data.parse_season_handicaps(fake.football_data_csv(), 2023)
-    assert set(handicaps["bookmaker"]) == {"bet365", "pinnacle", "max"}
+    assert set(handicaps["bookmaker"]) == {"bet365", "pinnacle", "max", "betfair_exchange"}
     assert set(handicaps["market_time"]) == {"opening", "closing"}
     pinnacle_closing = handicaps[(handicaps["bookmaker"] == "pinnacle") & (handicaps["market_time"] == "closing")]
     assert len(pinnacle_closing) == 10 and set(pinnacle_closing["line"]) == {-0.25, 0.0, -0.5, 0.75}
