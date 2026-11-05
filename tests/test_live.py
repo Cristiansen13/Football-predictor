@@ -73,6 +73,8 @@ def test_club_tokens_drop_what_sources_disagree_on():
         (["Sheffield United", "Sheffield Wednesday", "Hull City", "Bristol City", "Leicester City"], "Hull City", "Hull City"),
         (["Olympiakos", "PAOK", "AEK", "Aris"], "Olympiacos Piraeus", "Olympiakos"),
         (["Olympiakos", "PAOK", "AEK", "Aris"], "PAOK Thessaloniki", "PAOK"),
+        (["Espanol", "Celta", "Getafe"], "Espanyol", "Espanol"),
+        (["Ceuta", "Cadiz", "Burgos"], "Celta Fortuna", None),  # a letter apart, two different clubs
     ],
 )
 def test_club_matcher_bridges_the_spellings_of_two_sources(league, query, expected):
@@ -143,6 +145,8 @@ def test_log_prices_resolves_clubs_across_sources_and_records_the_rule_bets(ware
     assert "bet365" in set(every["bookmaker"]) and "average" not in set(every["bookmaker"])
     assert not value_board(snapshot, Rule(max_odds=1.5)).empty  # only Man City at 1.40 is that short
     assert select_bets(snapshot, Rule(max_odds=1.5))["home_name"].tolist() == ["Nottingham Forest"]
+    # Two days before kickoff is inside the default horizon and outside a one-day one.
+    assert select_bets(snapshot, Rule(horizon_hours=24)).empty and len(select_bets(snapshot, Rule(horizon_hours=60))) == 3
 
     # A later snapshot nearer kickoff: prices accumulate, the ledger keeps the first bet per fixture.
     later = log_prices(db, _snapshot_frames(T2, closing=True), resolvers)

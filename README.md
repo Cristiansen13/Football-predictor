@@ -585,7 +585,9 @@ logged before kickoff, with a ledger of what it picked.
   is stored with its time of collection in `price_snapshots`, and the rule's
   pick per fixture goes to `paper_bets` the first time the fixture qualifies,
   at the price and fair value of that moment; later runs add prices, never a
-  second bet on the fixture. The key is read from the `ODDS_API_KEY`
+  second bet on the fixture. Only fixtures within 72 hours of kickoff are bet
+  (`--horizon-hours`): the API lists rounds weeks ahead, and the study found
+  early prices lose their edge by closing. The key is read from the `ODDS_API_KEY`
   environment variable and written nowhere. Every ten bookmakers cost one
   credit per league, so a run over the eighteen leagues costs eighteen of the
   free plan's 500 a month: a run before each round, all season, fits.
@@ -623,9 +625,13 @@ across eighteen leagues, a few months. What the test can show that the
 backtest could not is whether the API's soft bookmakers hold the prices
 Football-Data's did, whether a logged price is still there at closing, and
 how far the return drifts from +2.7% out of sample in time rather than in
-leagues. The first run on 5 November 2026, Football-Data's file alone,
-logged 132 prices on 17 fixtures with every club resolved and, without a
-sharp price in that file, bet nothing.
+leagues. The first run, on 5 November 2026, logged 1,557 prices on 214
+fixtures (197 from the API across sixteen leagues; League One and Two came
+back empty) for 16 credits, resolved every club but two, both seeded since,
+and recorded 32 bets on the weekend's round, 21 of them at 1xBet and 11 at
+Coral, with a mean EV of +1.3%. One wrong match surfaced on the way: "Celta
+Fortuna" was paired with Ceuta, a letter apart, which is why near-identical
+tokens now need six letters.
 
 ## Caveats
 

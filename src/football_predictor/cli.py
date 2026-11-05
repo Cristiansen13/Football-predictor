@@ -539,7 +539,7 @@ def _now(args: argparse.Namespace) -> pd.Timestamp:
 def _rule(args: argparse.Namespace) -> Rule:
     books = None if args.books == "soft" else tuple(b.strip() for b in args.books.split(",") if b.strip())
     return Rule(name=args.rule, fair_book=args.fair_book, max_odds=args.max_odds, ev_threshold=args.ev_threshold,
-                books=books)
+                books=books, horizon_hours=args.horizon_hours)
 
 
 def _price_table(rows: pd.DataFrame, now: pd.Timestamp | None = None) -> str:
@@ -1016,6 +1016,9 @@ def build_parser() -> argparse.ArgumentParser:
                             "comma-separated list of bookmaker names as the warehouse stores them (default: soft)")
         p.add_argument("--max-odds", type=float, default=3.0, help="bet favourites only, up to this price")
         p.add_argument("--ev-threshold", type=float, default=0.0)
+        p.add_argument("--horizon-hours", type=float, default=72.0,
+                       help="bet only fixtures kicking off within this many hours (the API lists rounds weeks "
+                            "ahead; early prices lose their edge by closing; default: %(default)s)")
         p.add_argument("--now", default=None, help=argparse.SUPPRESS)  # a fixed clock, for tests
 
     live = sub.add_parser("log-prices", help="log the coming fixtures' prices before kickoff and record the rule's bets")

@@ -335,7 +335,8 @@ def _club_tokens_match(a: str, b: str) -> bool:
         return True
     if len(short) >= 5 and long.endswith(short):  # "gladbach" / "monchengladbach"
         return True
-    return len(short) >= 5 and levenshtein_similarity(a, b) >= 0.8  # "olympiakos" / "olympiacos"
+    # "olympiakos" / "olympiacos", "espanol" / "espanyol"; not "celta" / "ceuta", two different clubs.
+    return len(short) >= 6 and levenshtein_similarity(a, b) >= 0.8
 
 
 def _initials(tokens: list[str], others: list[str]) -> dict[int, list[int]]:

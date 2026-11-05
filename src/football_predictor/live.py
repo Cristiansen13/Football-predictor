@@ -40,7 +40,9 @@ SEED_ALIASES = {
     "FC Cologne": "FC Koln",
     "Stade Rennais": "Rennes",
     "Istanbul Basaksehir": "Buyuksehyr",
+    "Basaksehir": "Buyuksehyr",
     "Sporting CP": "Sp Lisbon",
+    "Vitória SC": "Guimaraes",
 }
 BOARD_COLUMNS = ["fixture", "match_id", "source", "division", "event_id", "kickoff_utc", "home_name", "away_name",
                  "selection", "bookmaker", "odds", "p_fair", "fair_odds", "ev", "snapshot_at", "fair_at"]
@@ -57,11 +59,15 @@ class Rule:
     max_odds: float = 3.0
     ev_threshold: float = 0.0
     books: tuple[str, ...] | None = None  # None: every soft bookmaker
+    # Bet only fixtures this close to kickoff. The API lists rounds weeks ahead,
+    # and the eighteen-league study found early prices lose their edge by closing.
+    horizon_hours: float = 72.0
 
     def describe(self) -> str:
         books = "every soft bookmaker" if self.books is None else ", ".join(self.books)
         return (f"{books} against the de-margined price of {self.fair_book}, odds up to {self.max_odds:g}, "
-                f"EV above {self.ev_threshold:+.1%}, the best selection per fixture")
+                f"EV above {self.ev_threshold:+.1%}, the best selection per fixture, fixtures within "
+                f"{self.horizon_hours:g} h of kickoff")
 
 
 FAVOURITES = Rule()
@@ -211,10 +217,12 @@ def select_bets(snapshot: pd.DataFrame, rule: Rule = FAVOURITES) -> pd.DataFrame
     """The rule's bet per fixture in a snapshot: its best qualifying selection, in :data:`LEDGER_COLUMNS`.
 
     Only fixtures with a warehouse match id are bet, since nothing else can
-    be settled. Ties go to the bookmaker named first alphabetically.
+    be settled, and only those within the rule's horizon of kickoff. Ties go
+    to the bookmaker named first alphabetically.
     """
     board = value_board(snapshot, rule)
-    board = board[board["match_id"].notna()]
+    hours_before = (pd.to_datetime(board["kickoff_utc"]) - pd.to_datetime(board["snapshot_at"])).dt.total_seconds() / 3600
+    board = board[board["match_id"].notna() & (hours_before <= rule.horizon_hours)]
     if board.empty:
         return pd.DataFrame(columns=LEDGER_COLUMNS)
     best = (board.sort_values(["match_id", "ev", "bookmaker"], ascending=[True, False, True])
