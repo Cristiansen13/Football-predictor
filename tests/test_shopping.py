@@ -29,6 +29,7 @@ def _prices():
         match = f"m{i}"
         if i != 3:  # the last fixture has no Pinnacle price: the average stands in
             rows_1x2.append((match, "pinnacle", "closing", *p))
+            rows_1x2.append((match, "pinnacle", "opening", p[0] + 0.1, p[1], p[2] - 0.1))  # the home side shortened
         rows_1x2.append((match, "average", "closing", p[0] * 0.98, p[1] * 0.98, p[2] * 0.98))
         rows_1x2.append((match, "softbook", "closing", *s))
         rows_1x2.append((match, "betfair_exchange", "closing", *e))
@@ -153,6 +154,33 @@ def test_price_shopping_handles_totals_handicaps_and_the_exchange():
     netted = net_exchange(prices, 0.05)["1x2"].set_index(["match_id", "bookmaker", "market_time"]).sort_index()
     assert netted.loc[("m0", "betfair_exchange", "closing"), "home"] == pytest.approx(net_odds(2.10, 0.05))
     assert netted.loc[("m0", "pinnacle", "closing"), "home"] == 2.00  # every other bookmaker is left as quoted
+
+
+def test_price_shopping_at_opening_prices_values_bets_at_closing():
+    matches, prices = _matches(), _prices()
+    opening = price_shopping(matches, prices, books=["softbook"], ev_threshold=0.0, markets=("1x2",),
+                             market_time="opening", n_resamples=0)
+    bets = opening.bets.set_index("match_id")
+    # Softbook's opening home price (closing + 0.3) beats Pinnacle's opening price on the three fixtures it prices.
+    assert set(bets.index) == {"m0", "m1", "m2"} and (bets["selection"] == "home").all()
+    assert bets.loc["m0", "odds"] == pytest.approx(2.50) and (bets["fair_source"] == "pinnacle").all()
+    fair_open = implied_probabilities(np.array([[2.10, 3.50, 3.90]]), MARKET_DEMARGIN)[0]
+    fair_close = implied_probabilities(np.array([[2.00, 3.50, 4.00]]), MARKET_DEMARGIN)[0]
+    assert bets.loc["m0", "ev"] == pytest.approx(fair_open[0] * 2.50 - 1)
+    # The closing-line value judges the same bet by Pinnacle's closing price, which moved towards the home side.
+    assert bets.loc["m0", "clv"] == pytest.approx(fair_close[0] * 2.50 - 1) and bets.loc["m0", "clv"] > bets.loc["m0", "ev"]
+    assert opening.metrics["mean_ev"] == pytest.approx(bets["ev"].mean())
+    assert opening.metrics["mean_clv"] == pytest.approx(bets["clv"].mean()) and opening.metrics["mean_clv"] != opening.metrics["mean_ev"]
+    # Settled at the opening price taken: m0 ended 2-0.
+    assert bets.loc["m0", "units"] == pytest.approx(1.50)
+    # At closing the closing-line value is the EV itself.
+    closing = price_shopping(matches, prices, books=["softbook"], ev_threshold=0.0, markets=("1x2",), n_resamples=0)
+    assert np.allclose(closing.bets["clv"], closing.bets["ev"]) and closing.metrics["mean_clv"] == closing.metrics["mean_ev"]
+    # Bets carry the division when the matches do, and the result then has a per-division table.
+    divided = price_shopping(matches.assign(division=["E0", "E0", "SC0", "SC0"]), prices, books=["softbook"],
+                             ev_threshold=0.0, markets=("1x2",), n_resamples=0)
+    assert set(divided.bets["division"]) == {"E0", "SC0"} and divided.by_division["bets"].sum() == len(divided.bets)
+    assert closing.by_division.empty
 
 
 def test_aggregate_gap_and_best_price_injection():

@@ -8,8 +8,11 @@ import pandas as pd
 
 from .db import Database
 
-# Expected clubs per division (Football-Data codes).
-DIVISION_SIZE = {"E0": 20, "E1": 24}
+# Expected clubs per division (Football-Data codes) where the size has been
+# stable; leagues that changed size, split or play play-offs are left unchecked.
+DIVISION_SIZE = {"E0": 20, "E1": 24, "E2": 24, "E3": 24, "D1": 18, "D2": 18, "SP1": 20, "SP2": 22,
+                 "I1": 20, "I2": 20, "F2": 20, "N1": 18, "P1": 18}
+MODEL_DIVISIONS = ("E0", "E1")  # the divisions the model depends on: problems there are errors
 UNDERSTAT_FIRST_SEASON = 2014
 
 
@@ -81,13 +84,14 @@ def validate(report: pd.DataFrame, current_season: int | None = None) -> list[Is
     for row in report.itertuples(index=False):
         size = DIVISION_SIZE.get(row.division)
         finished = current_season is None or row.season < current_season
+        level = "error" if row.division in MODEL_DIVISIONS else "warning"
         if size is not None:
             expected = size * (size - 1)
             if row.teams != size:
-                issues.append(Issue("error", row.division, row.season,
+                issues.append(Issue(level, row.division, row.season,
                                     f"{row.teams} clubs, expected {size} (name resolution problem?)"))
             if finished and row.played != expected:
-                issues.append(Issue("error", row.division, row.season,
+                issues.append(Issue(level, row.division, row.season,
                                     f"{row.played} results, expected {expected}"))
         if row.division == "E0":
             if row.season >= UNDERSTAT_FIRST_SEASON and row.xg < 0.95:

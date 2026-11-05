@@ -47,6 +47,18 @@ def test_football_data_bookmaker_codes_across_file_generations():
     assert handicaps.iloc[0][["bookmaker", "line", "home"]].tolist() == ["max", -0.5, 1.95]
 
 
+def test_football_data_drops_zero_prices():
+    """A handful of real rows carry 0 or 1 where a price is missing; they must not read as certainties."""
+    header = "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,B365H,B365D,B365A,PSH,PSD,PSA,B365>2.5,B365<2.5,AHh,B365AHH,B365AHA"
+    row = "E0,19/08/17,Watford,Liverpool,3,3,0,3.0,4.0,2.1,3.1,4.1,1.0,1.9,0,1.95,0.5"
+    text = f"{header}\n{row}\n"
+    _, odds = football_data.parse_season(text, 2017)
+    assert odds["bookmaker"].tolist() == ["pinnacle"]  # the bet365 row has no usable home price
+    assert football_data.parse_season_totals(text, 2017).empty
+    handicaps = football_data.parse_season_handicaps(text, 2017)
+    assert handicaps.empty  # the away price 0.5 is not a price; the line 0 is fine on its own
+
+
 def test_football_data_two_digit_years_without_time():
     csv = "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG\nE0,19/08/17,Watford,Liverpool,3,3\n"
     matches, odds = football_data.parse_season(csv, 2017)

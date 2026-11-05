@@ -159,3 +159,18 @@ def test_shop_evaluates_price_shopping_without_a_model(tmp_path, capsys, offline
     assert len(bets) == 10 and (bets["selection"] == "over").all() and (bets["odds"] == 1.95).all()
     with pytest.raises(SystemExit, match="unknown bookmaker"):
         main(["--data-dir", str(tmp_path), "shop", "--seasons", "2023", "--books", "nosuch"])
+
+
+def test_shop_across_divisions_and_at_opening_prices(tmp_path, capsys, offline):
+    main(["--data-dir", str(tmp_path), "ingest", "--seasons", "2023", "--sources", "football_data", "--no-upcoming",
+          "--divisions", "E0", "SC0"])
+    capsys.readouterr()
+    # At Football-Data's earlier prices the exchange, gross of commission, beats Pinnacle on every fixture.
+    main(["--data-dir", str(tmp_path), "shop", "--seasons", "2023", "--divisions", "all", "--market-time", "opening",
+          "--books", "exchange", "--commission", "0", "--ev-threshold", "0", "--markets", "1x2", "--resamples", "0"])
+    out = capsys.readouterr().out
+    assert "Price shopping, E0 SC0 seasons 2023: 20 matches" in out and "opening price of pinnacle" in out
+    assert "Per division" in out and "ev_%" in out and "clv_%" in out
+    bets = pd.read_csv(tmp_path / "reports" / "shopping_2023_all_exchange_opening.csv")
+    assert len(bets) == 20 and set(bets["division"]) == {"E0", "SC0"} and bets["match_id"].is_unique
+    assert (bets["odds"].isin([2.16, 3.60, 3.95])).all() and (bets["clv"] != bets["ev"]).all()

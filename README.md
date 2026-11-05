@@ -34,11 +34,12 @@ make data              # results + odds (PL and Championship), xG/PPDA, possessi
 make data-fbref        # possession and cup fixtures from FBref instead (see the caveat on anti-bot challenges)
 make data-lineups      # + starting XIs with each player's xG/xA from 2022/23 (about 25 min per season, resumable)
 make data-full         # + SOFIFA ratings (behind Cloudflare at the moment)
+make data-leagues      # results and every bookmaker's prices for sixteen other leagues, 2019/20 on (price studies only)
 make status            # coverage per season, data issues, leakage audit
 make backtest          # tune ξ and xG weight on the two previous seasons, test on the last completed one
 make backtest-rolling  # one walk-forward over 2021/22-2025/26: five seasons of scored matches, per-season table
 make backtest-market   # price-shopping benchmark: the sharp closing line as fair value, bet the best price
-make shop              # the same benchmark without a model, over the bookmakers the data names (BOOKS=max|named|soft|exchange)
+make shop              # the same benchmark without a model, over the bookmakers the data names (BOOKS=max|named|soft|exchange, DIVISIONS=E0|all)
 make predict           # this week's fixtures: probabilities, EV against current prices
 ```
 
@@ -46,14 +47,14 @@ Each target is a thin wrapper around the CLI:
 
 | Command | Purpose |
 | :--- | :--- |
-| `football-predictor ingest [--seasons 2014-2025] [--sources …\|all] [--lineups]` | ETL into `data/football.db`; exits non-zero if a source failed |
+| `football-predictor ingest [--seasons 2014-2025] [--sources …\|all] [--divisions E0 E1 …] [--lineups]` | ETL into `data/football.db`; exits non-zero if a source failed. `--divisions` takes any Football-Data league code (`D1`, `SP1`, `I1`, …; the model and the other sources cover `E0`/`E1` only) |
 | `football-predictor check-sources [--season 2024]` | fetch and parse one live page per source |
 | `football-predictor status [--audit N]` | data coverage report, quality issues, point-in-time audit of N matches |
 | `football-predictor ratings [--as-of DATE]` | team attack/defence ratings |
 | `football-predictor predict HOME AWAY` / `--upcoming DAYS` | model and market-anchored forecasts: score grids, markets, best-EV bet and stake |
 | `football-predictor scan [--upcoming DAYS] [--fair anchored\|model] [--ev-threshold X] [--commission C]` | value board: every bookmaker's price on the coming fixtures (1X2, over/under, Asian handicap) against the fair value, with EV and Kelly stake; the exchange's prices net of commission |
 | `football-predictor backtest [--test-season Y \| --test-seasons A-B] [--tune] [--compare] [--markets 1x2 totals] [--fair model\|market\|blend] [--price closing\|opening\|max] [--books named]` | walk-forward evaluation and betting simulation, 1X2 and over/under 2.5; `--books` takes the best price over chosen bookmakers instead of the market maximum |
-| `football-predictor shop [--seasons A-B] [--books max\|named\|soft\|exchange\|list] [--fair-book pinnacle] [--ev-threshold X] [--each-book]` | price shopping without a model: the sharp closing line as fair value, the bet wherever the chosen bookmakers beat it; returns, bootstrap intervals and closing-line value by season, market and bookmaker |
+| `football-predictor shop [--seasons A-B] [--divisions E0 …\|all] [--books max\|named\|soft\|exchange\|list] [--fair-book pinnacle] [--market-time closing\|opening] [--ev-threshold X] [--max-odds X] [--each-book]` | price shopping without a model: the sharp line as fair value, the bet wherever the chosen bookmakers beat it, at closing or at Football-Data's earlier prices; returns, bootstrap intervals and closing-line value by division, season, market and bookmaker |
 
 Reports go to `data/reports/` (`metrics_<season>.json`, predictions, bets,
 calibration table, PnL curve and reliability diagram). Use `--data-dir` to move them.
@@ -62,7 +63,7 @@ calibration table, PnL curve and reliability diagram). Use `--data-dir` to move 
 
 | Source | Module | Method | Loaded into |
 | :--- | :--- | :--- | :--- |
-| Football-Data.co.uk | `etl/football_data.py` | direct CSV, Premier League (`E0`) and Championship (`E1`), plus the weekly `fixtures.csv` | `matches`, `odds` (1X2 opening and closing prices of every bookmaker a file names: Bet365, bwin, Interwetten, William Hill, BetVictor, Ladbrokes, Betfair and its exchange, 1xBet, Betfred, BetMGM, Coral, Paddy Power, Sky Bet, Pinnacle, plus the market maximum and average), `totals_odds` (over/under 2.5), `handicap_odds` (Asian handicap line and prices), shot counts |
+| Football-Data.co.uk | `etl/football_data.py` | direct CSV, Premier League (`E0`) and Championship (`E1`) by default, any of its other leagues on request (`--divisions`; `make data-leagues` loads sixteen), plus the weekly `fixtures.csv` | `matches`, `odds` (1X2 opening and closing prices of every bookmaker a file names: Bet365, bwin, Interwetten, William Hill, BetVictor, Ladbrokes, Betfair and its exchange, 1xBet, Betfred, BetMGM, Coral, Paddy Power, Sky Bet, Pinnacle, plus the market maximum and average), `totals_odds` (over/under 2.5), `handicap_odds` (Asian handicap line and prices), shot counts |
 | Understat | `etl/understat.py` | regex over `JSON.parse('\x..')` script tags; falls back to its JSON endpoint | `advanced_stats` (xG, npxG, PPDA, deep completions; xA from match rosters), `lineups` |
 | ESPN | `etl/espn.py` | public JSON endpoints of ESPN's own site (no key, not a documented API) | `match_stats` (possession, shots), `team_schedule` (league, cups, Europe) |
 | FBref | `etl/fbref.py` | BeautifulSoup over `data-stat` cells, including tables hidden in HTML comments | `matches`, `match_stats` (possession, shots), `team_schedule` (all competitions) |
@@ -79,7 +80,10 @@ calibration table, PnL curve and reliability diagram). Use `--data-dir` to move 
   similarity plus a token-prefix rule (*Peterboro* → *Peterborough United*).
   Ambiguous names such as *Manchester* are rejected. A brand-new lower-division
   club is registered only when nothing scores above 0.75, so a near-miss
-  spelling never creates a duplicate. Each club gets a deterministic UUIDv5,
+  spelling never creates a duplicate. Clubs outside England are known to
+  Football-Data alone, so their spelling is registered as it is rather than
+  matched: fuzzy matching would hand *Rangers* to Queens Park Rangers and
+  *Dundee* to Dundee United, and refuse *Gent* next to *Genk*. Each club gets a deterministic UUIDv5,
   and a fixture's `match_id` is derived from `(season, home_id, away_id)`, so
   every source computes the same key and `v_match_dataset` joins them in plain SQL.
 * **Robust loading.** Every (source, season) step is idempotent. A failing
@@ -440,7 +444,8 @@ opening and closing prices:
   aggregates, they are not detectable at the bookmakers a bettor can name,
   and they are closing. `football-predictor backtest --price max --books
   named` runs the model-based engine, Kelly staking included, on the same
-  reachable prices.
+  reachable prices. Two leagues cannot settle a 2% question, so the next
+  section asks it of eighteen.
 
   A by-product worth knowing: Football-Data dropped Pinnacle during 2025/26
   (210 of 380 fixtures priced) and lists it nowhere in 2026/27, so the
@@ -456,6 +461,105 @@ opening and closing prices:
   longshots too much probability, so they looked like value. The power (or
   Shin) method prices favourites higher and the realised return then matches
   the CLV. The backtest uses the power method throughout.
+
+### Eighteen leagues: the edge is on favourites at soft bookmakers
+
+On the Premier League alone the named-bookmaker result was a quarter as many
+bets as the benchmark with an interval thirty points wide; the same rule on
+the Championship looked the same. A 2% edge needs tens of thousands of bets
+to show, so `make data-leagues` loads sixteen more leagues from Football-Data
+(the lower English and Scottish divisions, the top two in Germany, Spain,
+Italy and France, the Netherlands, Belgium, Portugal, Turkey and Greece), with
+the same bookmakers in every file. Seven seasons, 2019/20–2025/26, 44,986
+matches, 1X2 only, the sharp line as fair value and the bet at the best
+closing price among the soft bookmakers the files name (Bet365, bwin,
+Interwetten, William Hill, BetVictor, and from 2024/25 1xBet, Betfair,
+Betfred, BetMGM, Coral, Ladbrokes, Paddy Power and Sky Bet: everyone except
+Pinnacle and the exchange), one bet per fixture, flat stakes. Seven rules were
+fixed before any of them was run; the Premier League and Championship were
+the leagues the rule was developed on, so the other sixteen are reported
+separately as the out-of-sample set (`make shop DIVISIONS=all BOOKS=soft`,
+`make shop-favourites`):
+
+| Rule (soft books against Pinnacle closing, 1X2) | Bets | Flat-stake ROI | 95% interval | Mean CLV | p(ROI ≤ 0) | Sixteen other leagues only |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Any positive EV, all odds | 17,048 | +1.9% | −0.1% to +4.2% | +2.8% | 0.03 | 14,730 bets, +1.8% (−0.6% to +4.2%) |
+| EV above 2% | 7,159 | +3.5% | −0.3% to +7.4% | +5.6% | 0.03 | 6,385 bets, +4.1% (+0.3% to +8.3%) |
+| **Odds up to 3.0, any positive EV** | **9,368** | **+2.7%** | **+0.8% to +4.8%** | **+2.4%** | **0.004** | **8,090 bets, +2.9% (+0.7% to +5.1%)** |
+| Odds up to 3.0, EV above 2% | 3,389 | +3.6% | +0.1% to +7.0% | +5.3% | 0.02 | 3,058 bets, +3.5% (−0.1% to +7.3%) |
+| At Football-Data's earlier prices (days before kickoff) | 12,558 | +1.3% | −1.2% to +3.9% | +0.9% (EV +2.0%) | 0.16 | 11,179 bets, +1.5% |
+| Market average as fair value instead of Pinnacle | 10,768 | +1.9% | −1.0% to +4.6% | +2.8% | 0.09 | 9,410 bets, +2.2% |
+| Every named bookmaker, Pinnacle and the exchange included | 18,033 | +1.3% | −0.8% to +3.4% | +2.9% | 0.13 | 15,659 bets, +1.1% |
+
+What holds up:
+
+* **A small edge is real at soft bookmakers.** Every rule struck at closing
+  returns more than zero (the all-odds rule +1.9% over seventeen thousand
+  bets), and its closing-line value is between +2% and +5% in every league
+  and between +2% and +4% in every season. The realised return only tracks
+  it on favourites. By price band of the all-odds rule: odds up to 1.5
+  return +3.7% (+1.5% to +6.0%, 2,302 bets) on +1.5% CLV, 1.5 to 2.5 about
+  +3.4% on +2.7%, 2.5 to 4 about +0.3% on +2.7% CLV (7,103 bets), and above
+  4 the CLV of +4% to +5% comes back as noise (2,807 bets, +2%, −7% to
+  +11%). The de-margined sharp price still gives longshots more chance than
+  they have, so a soft bookmaker's generous longshot price is not value; on
+  favourites the sharp price is honest and the discrepancy is money. That is
+  the favourite-longshot bias of the literature, seen from the other side,
+  and the reason the favourites rule was on the list before the data came in.
+* **The favourites rule survives every check tried.** Only fixtures Pinnacle
+  itself closes: 8,958 bets, +2.9% (+0.8% to +4.9%). Four accounts only
+  (Bet365, William Hill, bwin, Interwetten, the four named in every season):
+  7,655 bets, +2.8% (+0.6% to +5.2%). Odds up to 2: 5,118 bets, +2.5% (+0.6%
+  to +4.5%). EV above 1%: +2.8%; every qualifying selection rather than one
+  per fixture: +2.8%. Home favourites +2.7% on 6,276 bets, away favourites
+  +3.3% on 2,597. Seven rules were tried on the pooled data; the favourites
+  rule's p-value of 0.004 is 0.025 after correcting for all seven, and it
+  replicates on the sixteen leagues it was not developed on.
+* **Season by season, and league by league, it is a thin edge:**
+
+  | Season | Bets | Flat-stake ROI | 95% interval | Mean CLV |
+  | :--- | :--- | :--- | :--- | :--- |
+  | 2019/20 | 1,446 | 0.0% | −5.2% to +5.4% | +2.5% |
+  | 2020/21 | 1,349 | +2.2% | −3.5% to +7.7% | +2.5% |
+  | 2021/22 | 1,784 | +3.4% | −1.4% to +7.8% | +3.3% |
+  | 2022/23 | 1,196 | +9.6% | +4.1% to +15.2% | +2.3% |
+  | 2023/24 | 974 | +2.8% | −3.1% to +8.7% | +2.0% |
+  | 2024/25 | 1,611 | +1.7% | −3.0% to +6.3% | +1.8% |
+  | 2025/26 | 1,008 | −0.1% | −6.0% to +5.7% | +2.2% |
+
+  Positive in thirteen leagues of eighteen (Belgium +9.6% on 633 bets,
+  League One +9.0%, League Two +8.4%, Turkey +7.4%, Spain +6.6%; France
+  −7.7% and the 2. Bundesliga −5.2% the worst), with the closing-line value
+  steady at +1.6% to +4.7% everywhere, so a league's or a season's sign is
+  mostly noise around a +2% to +3% expectation. Two seasons in seven came
+  out flat and one carried nearly half of the profit. At 1% of the bankroll per bet,
+  about 1,300 bets a season, that expectation is roughly +35% a season before
+  account limits, and the limits are the real constraint: this is exactly
+  the behaviour soft bookmakers restrict.
+* **Where the price comes from.** William Hill supplies the most value
+  (1,926 of the bets, +4.9% on +4.5% CLV), then Bet365 (+5.0% on 1,039),
+  BetVictor (+3.2%), Interwetten (+2.2% on 2,274), bwin (+1.2% on 1,668) and
+  1xBet (+0.7%); the bookmakers added in 2025/26 have too few bets to say.
+  The Betfair Exchange, which does not restrict winners, gives +1.9% (−2.1%
+  to +5.9%) on 2,369 favourites at 2% commission over its two seasons and
+  loses at 5%; Pinnacle's closing price as the fair value is what makes the
+  rule work, and judging the soft prices by the exchange's own closing price
+  instead finds +1.4% on 2,000 bets.
+* **Betting earlier does not help here either.** At the earlier prices the
+  soft bookmakers beat Pinnacle's own earlier price by +2.0% on average, but
+  by closing Pinnacle has moved towards them and the closing-line value of
+  those bets is +0.9%. The sharp line moves and the soft line stays; the
+  edge is in the soft line's staleness at closing, not in being early.
+
+The practical reading: judge a 1X2 price by Pinnacle's de-margined closing
+price, bet favourites (odds up to 3) wherever a soft bookmaker beats it, at
+closing, flat stakes, across as many leagues as one holds accounts for, and
+expect +2% to +3% per bet with seasons that can come out flat. The caveats
+are the usual two and one new one: the prices are closing prices, reachable
+only in the last minutes before kickoff; bookmakers restrict accounts that do
+this; and Football-Data no longer lists Pinnacle, so a live version of the
+rule needs the sharp price from somewhere else (`scan` falls back to the
+market average, which forecasts as well but moves the thresholds).
 
 ## Caveats
 
@@ -488,12 +592,14 @@ opening and closing prices:
 make test
 ```
 
-The suite covers entity resolution, all parsers (including the Understat
-JSON-endpoint fallback, Football-Data fixtures and every bookmaker code its
-files have used), anti-bot detection and browser fallback, the full ETL →
+The suite covers entity resolution (including exact registration of clubs
+outside England), all parsers (including the Understat JSON-endpoint
+fallback, Football-Data fixtures, every bookmaker code its files have used
+and its stray zero prices), anti-bot detection and browser fallback, the full ETL →
 SQL → feature path on fake sources, schema migration, SOFIFA resume,
 data-quality checks, the leakage audit, parameter recovery, xG weighting and
 the promoted-club benefit on simulated leagues, gradient checks, scoring
 rules, calibration, bootstrap intervals, Kelly settlement, price shopping
 (best prices over bookmaker sets, exchange commission, fair-value fallback,
+closing-line value of bets struck earlier, several divisions at once,
 settlement of 1X2, totals and handicap bets), tuning and the CLI commands.

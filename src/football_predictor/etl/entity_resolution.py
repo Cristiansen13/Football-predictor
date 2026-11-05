@@ -140,7 +140,12 @@ CHAMPIONSHIP_TEAMS = [
     "Wycombe Wanderers", "Yeovil Town",
 ]
 
-CANONICAL_TEAMS = PREMIER_LEAGUE_TEAMS + CHAMPIONSHIP_TEAMS
+# League One and Two clubs whose Football-Data spelling is a near-miss of a
+# Premier League club's ("Northampton" scores 0.82 against Southampton):
+# fuzzy matching would neither accept nor create them.
+LOWER_LEAGUE_TEAMS = ["Northampton Town"]
+
+CANONICAL_TEAMS = PREMIER_LEAGUE_TEAMS + CHAMPIONSHIP_TEAMS + LOWER_LEAGUE_TEAMS
 
 # Nicknames and abbreviations that no string metric can recover.
 TEAM_ALIASES = {
@@ -259,6 +264,22 @@ class FuzzyMatcher:
 
     def resolve_id(self, name: str, *, create_missing: bool = False) -> str:
         return self.resolve(name, create_missing=create_missing).entity_id
+
+    def register(self, name: str) -> Resolution:
+        """Resolve ``name`` by its exact (normalised) spelling only, registering it when new.
+
+        For a source whose names are consistent and self-contained, such as
+        Football-Data's files for the leagues outside England, a fuzzy match
+        against the English register does harm: "Rangers" is not Queens Park
+        Rangers, "Dundee" is not Dundee United and "Gent" is a different club
+        from "Genk". Once registered, the name resolves exactly ever after.
+        """
+        key = self.normalizer(name)
+        if key in self._keys:
+            canonical = self._keys[key]
+            method = "exact" if self.normalizer(canonical) == key else "alias"
+            return Resolution(name, canonical, self._canonical[canonical], 1.0, method)
+        return Resolution(name, name, self.add_entity(name), 1.0, "created")
 
 
 def team_resolver(**kwargs) -> FuzzyMatcher:

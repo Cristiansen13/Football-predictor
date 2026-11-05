@@ -1,7 +1,9 @@
 """Football-Data.co.uk: results, basic match stats and bookmaker odds (direct CSV).
 
-Division codes: ``E0`` Premier League, ``E1`` Championship. ``fixtures.csv``
-lists the coming week's fixtures of every division with current prices.
+Division codes are Football-Data's (:data:`DIVISIONS`): ``E0`` Premier League,
+``E1`` Championship, ``D1`` Bundesliga and so on; every season file has the
+same layout. ``fixtures.csv`` lists the coming week's fixtures of every
+division with current prices.
 """
 
 from __future__ import annotations
@@ -14,6 +16,17 @@ import pandas as pd
 from ..config import season_code, season_from_date
 from .http import HttpClient
 
+# Football-Data's main-league files, all in the same layout.
+DIVISIONS = {
+    "E0": "Premier League", "E1": "Championship", "E2": "League One", "E3": "League Two", "EC": "National League",
+    "SC0": "Scottish Premiership", "SC1": "Scottish Championship",
+    "D1": "Bundesliga", "D2": "2. Bundesliga", "SP1": "La Liga", "SP2": "Segunda Division",
+    "I1": "Serie A", "I2": "Serie B", "F1": "Ligue 1", "F2": "Ligue 2", "N1": "Eredivisie",
+    "B1": "Belgian Pro League", "P1": "Primeira Liga", "T1": "Super Lig", "G1": "Super League Greece",
+}
+# Divisions whose club names are resolved against the English register; the
+# others register their Football-Data spelling as is (see Pipeline).
+ENGLISH_DIVISIONS = frozenset({"E0", "E1", "E2", "E3", "EC"})
 CSV_URL = "https://www.football-data.co.uk/mmz4281/{code}/{division}.csv"
 FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
 ODDS_FIELDS = ["season", "home_team", "away_team", "bookmaker", "market_time", "home", "draw", "away"]
@@ -159,6 +172,10 @@ def _prices_long(
             continue
         block = raw[list(columns)].apply(pd.to_numeric, errors="coerce")
         block.columns = names
+        # A decimal price is above 1 by definition; the files hold a handful of
+        # zeros and ones (no price), which would read as a certainty.
+        price_names = [n for n in names if n != "line"]
+        block[price_names] = block[price_names].where(block[price_names] > 1.0)
         for column, value in constants.items():
             block.insert(0, column, value)
         block.insert(0, "market_time", market_time)

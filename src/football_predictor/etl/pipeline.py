@@ -43,8 +43,10 @@ class Pipeline:
     def _cache(self, season: int) -> dict[str, bool]:
         return {"use_cache": season != self.current_season}
 
-    def team_id(self, name: str, source: str, *, create_missing: bool = False) -> str:
-        resolution = self.resolver.resolve(name, create_missing=create_missing)
+    def team_id(self, name: str, source: str, *, create_missing: bool = False, exact: bool = False) -> str:
+        """``exact``: register the spelling as it is instead of fuzzy-matching it."""
+        resolution = (self.resolver.register(name) if exact
+                      else self.resolver.resolve(name, create_missing=create_missing))
         if resolution.method == "created" and name not in self._created:
             self._created.add(name)
             log.info("%s: registered new club %r", source, name)
@@ -103,12 +105,27 @@ class Pipeline:
                           ["match_id", "bookmaker", "market_time", "line", "home", "away"]]
         )
 
+    def _register_foreign_clubs(self, matches: pd.DataFrame) -> None:
+        """Clubs outside England are known to one source only, under one spelling.
+
+        Fuzzy matching them against the English register would merge
+        lookalikes (Rangers into Queens Park Rangers, Dundee into Dundee
+        United) or refuse near-misses (Gent against Genk), so their
+        Football-Data name is registered as it is. Later lookups of the same
+        name resolve exactly, whichever path they take.
+        """
+        foreign = matches[~matches["division"].isin(football_data.ENGLISH_DIVISIONS)]
+        for column in ("home_team", "away_team"):
+            for name in foreign[column].dropna().unique():
+                self.team_id(name, "football_data", exact=True)
+
     def load_football_data(self, season: int, division: str = "E0") -> None:
         csv_text = football_data.fetch_season_csv(self.client, season, division, **self._cache(season))
         matches, odds = football_data.parse_season(csv_text, season, division)
         # Lower-division names are less curated: a club no known name resembles
         # becomes a new entity instead of failing the load.
         create = division != "E0"
+        self._register_foreign_clubs(matches)
         matches = self._with_match_ids(self._with_team_ids(matches, "football_data", create_missing=create))
         self.db.upsert_matches(matches, "football_data")
 
@@ -141,6 +158,7 @@ class Pipeline:
         if matches.empty:
             log.info("football-data fixtures: none listed")
             return
+        self._register_foreign_clubs(matches)
         matches = self._with_match_ids(self._with_team_ids(matches, "football_data", create_missing=True))
         self.db.upsert_matches(matches, "football_data")
         self._load_odds(odds, True)

@@ -181,7 +181,8 @@ def summarize(bets: pd.DataFrame, *, n_resamples: int = 2000, seed: int = 0) -> 
     out = {
         "bets": int(len(bets)),
         "flat_stake_roi": float(units.mean()),
-        "mean_clv": float(bets["ev"].mean()),
+        "mean_ev": float(bets["ev"].mean()),
+        "mean_clv": float(bets["clv"].mean()) if "clv" in bets else float(bets["ev"].mean()),
         "hit_rate": float((units > 0).mean()),
         "mean_odds": float(bets["odds"].mean()),
     }
@@ -203,6 +204,7 @@ class ShoppingResult:
     by_season: pd.DataFrame
     by_market: pd.DataFrame
     by_bookmaker: pd.DataFrame
+    by_division: pd.DataFrame = field(default_factory=pd.DataFrame)
     coverage: dict = field(default_factory=dict)
 
 
@@ -219,26 +221,33 @@ def price_shopping(
     min_odds: float = 1.01,
     max_odds: float = 15.0,
     one_per_match: bool = True,
+    market_time: str = "closing",
     n_resamples: int = 2000,
 ) -> ShoppingResult:
-    """Bet wherever a bookmaker in ``books`` beats the de-margined closing price of ``fair_book``.
+    """Bet wherever a bookmaker in ``books`` beats the de-margined price of ``fair_book``.
 
     ``matches`` needs match_id, season, kickoff, home_team, away_team and the
     goals; unplayed rows are ignored. Per fixture the highest-EV selection is
     taken (every selection above the threshold with ``one_per_match=False``),
-    on flat one-unit stakes, settled at the price taken. The EV of each bet is
-    also its closing-line value, since the fair value *is* the closing line.
-    With ``strict_fair`` fixtures the fair bookmaker does not price are
-    skipped rather than judged by the next reference price.
+    on flat one-unit stakes, settled at the price taken. Both the price and
+    the fair value are read at ``market_time``: at closing the EV of each bet
+    is also its closing-line value, since the fair value *is* the closing
+    line; at ``"opening"`` (Football-Data's earlier collection, days before
+    kickoff) the bet is judged by the fair bookmaker's opening price and its
+    closing-line value (``clv``) by the same bookmaker's closing price. With
+    ``strict_fair`` fixtures the fair bookmaker does not price are skipped
+    rather than judged by the next reference price.
     """
     played = matches[matches["home_goals"].notna() & matches["away_goals"].notna()]
     played = played.sort_values("kickoff").reset_index(drop=True)
     ids = played["match_id"]
-    best = best_prices(prices, books, commission=commission).reindex(ids)
-    fair = reference_probabilities(prices, book=fair_book).reindex(ids)
+    best = best_prices(prices, books, market_time=market_time, commission=commission).reindex(ids)
+    fair = reference_probabilities(prices, book=fair_book, market_time=market_time).reindex(ids)
+    closing = fair if market_time == "closing" else reference_probabilities(prices, book=fair_book).reindex(ids)
     n, k = len(played), len(SELECTIONS)
     odds = np.full((n, k), np.nan)
     probability = np.full((n, k), np.nan)
+    p_closing = np.full((n, k), np.nan)
     bookmaker = np.full((n, k), "", dtype=object)
     source = np.full((n, k), "", dtype=object)
     lines = np.full(n, np.nan)
@@ -251,10 +260,15 @@ def price_shopping(
             if fair_names[column] in fair:
                 probability[:, j] = fair[fair_names[column]].to_numpy(dtype=float)
                 source[:, j] = fair[f"ref_{market}"].fillna("").to_numpy()
-        if market == "handicap" and "max_ah_line" in best and "ref_ah_line" in fair:
+            if fair_names[column] in closing:
+                p_closing[:, j] = closing[fair_names[column]].to_numpy(dtype=float)
+        if market == "handicap" and "max_ah_line" in best:
             lines = best["max_ah_line"].to_numpy(dtype=float)
-            same = np.isclose(lines, fair["ref_ah_line"].to_numpy(dtype=float))
-            odds[~same, 5:7] = np.nan
+            # A handicap bet is judged, and valued at closing, only at the same line.
+            if "ref_ah_line" in fair:
+                odds[~np.isclose(lines, fair["ref_ah_line"].to_numpy(dtype=float)), 5:7] = np.nan
+            if "ref_ah_line" in closing:
+                p_closing[~np.isclose(lines, closing["ref_ah_line"].to_numpy(dtype=float)), 5:7] = np.nan
     if strict_fair:
         probability[source != fair_book] = np.nan
     allowed = (np.isfinite(odds) & np.isfinite(probability) & (odds >= min_odds) & (odds <= max_odds)
@@ -267,7 +281,10 @@ def price_shopping(
         rows, cols = rows[chosen], pick[chosen]
     else:
         rows, cols = np.nonzero(ev > ev_threshold)
-    bets = played.iloc[rows][["match_id", "season", "kickoff", "home_team", "away_team"]].reset_index(drop=True)
+    columns = ["match_id", "season", "kickoff", "home_team", "away_team"]
+    if "division" in played:
+        columns.insert(2, "division")
+    bets = played.iloc[rows][columns].reset_index(drop=True)
     bets["market"] = SELECTION_MARKET[cols]
     bets["selection"] = SELECTIONS[cols]
     bets["line"] = np.where(cols >= 5, lines[rows], np.nan)
@@ -276,6 +293,7 @@ def price_shopping(
     bets["odds"] = odds[rows, cols]
     bets["p_fair"] = probability[rows, cols]
     bets["ev"] = ev[rows, cols]
+    bets["clv"] = p_closing[rows, cols] * odds[rows, cols] - 1.0
     bets["units"] = settle_units(
         cols, odds[rows, cols],
         home_goals=played["home_goals"].to_numpy(dtype=float)[rows],
@@ -297,6 +315,7 @@ def price_shopping(
         by_season=_table(bets, "season", n_resamples=n_resamples),
         by_market=_table(bets, "market", n_resamples=n_resamples),
         by_bookmaker=_table(bets, "bookmaker", n_resamples=n_resamples),
+        by_division=_table(bets, "division", n_resamples=n_resamples) if "division" in bets else pd.DataFrame(),
         coverage=coverage,
     )
 

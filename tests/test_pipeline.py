@@ -38,6 +38,28 @@ def test_sources_are_merged_onto_one_entity_per_club(loaded_db):
     assert matches.to_dict() == {"E0": 12, "E1": 12}
 
 
+def test_clubs_outside_england_are_registered_by_their_own_name(tmp_path):
+    db = Database(tmp_path / "football.db")
+    pipeline = Pipeline(db, fake.FakeClient(), current_season=fake.SEASON, divisions=("E0", "SC0"))
+    assert pipeline.run([fake.SEASON], ["football_data"], upcoming=False) == []
+    teams = set(db.query("SELECT canonical_name FROM teams")["canonical_name"])
+    # Rangers is not Queens Park Rangers and Dundee is not Dundee United: four Scottish clubs, four entities.
+    assert set(fake.SCOTTISH.values()) <= teams and "Queens Park Rangers" not in teams
+    aliases = db.query("SELECT alias, team_id, method FROM team_aliases WHERE source = 'football_data'").set_index("alias")
+    assert aliases.loc["Rangers", "team_id"] == team_uuid("Rangers") != team_uuid("Queens Park Rangers")
+    assert aliases.loc["Dundee", "team_id"] != aliases.loc["Dundee United", "team_id"]
+    assert set(aliases.loc[list(fake.SCOTTISH.values()), "method"]) <= {"created", "exact"}
+    assert aliases.loc["Man United", "team_id"] == team_uuid("Manchester United")  # the English file still goes through the register
+    data = db.load_match_dataset()
+    scottish = data[data["division"] == "SC0"]
+    assert len(scottish) == 10 and (scottish["odds_bookmaker"] == "pinnacle").all()
+    assert set(scottish["home_team"]) == set(fake.SCOTTISH.values())
+    # The same spelling resolves to the same club on a second pass, so a re-ingest is idempotent.
+    assert pipeline.run([fake.SEASON], ["football_data"], upcoming=False) == []
+    assert len(db.query("SELECT * FROM teams")) == len(teams)
+    db.close()
+
+
 def test_match_dataset_joins_every_source(loaded_db):
     db, _, _ = loaded_db
     data = db.load_match_dataset()

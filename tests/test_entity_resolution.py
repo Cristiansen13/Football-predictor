@@ -47,6 +47,7 @@ def test_similarity_bounds():
         ("Newcastle Utd", "Newcastle United"),
         ("Leicester", "Leicester City"),
         ("Totenham Hotspur", "Tottenham Hotspur"),  # typo, plain Levenshtein
+        ("Northampton", "Northampton Town"),  # a near-miss of Southampton, registered so it cannot be refused
     ],
 )
 def test_team_variants_resolve(variant, canonical):
@@ -69,6 +70,26 @@ def test_unknown_team_can_be_registered():
     created = resolver.resolve("Real Madrid", create_missing=True)
     assert created.method == "created"
     assert resolver.resolve("Real Madrid").entity_id == created.entity_id
+
+
+def test_register_keeps_lookalike_clubs_apart():
+    # Fuzzy matching hands Rangers to an English club and refuses Gent next to Genk (and remembers the spelling).
+    fuzzy = team_resolver()
+    assert fuzzy.resolve("Rangers", create_missing=True).canonical == "Queens Park Rangers"
+    assert fuzzy.resolve("Genk", create_missing=True).method == "created"
+    with pytest.raises(UnresolvedEntityError):
+        fuzzy.resolve("Gent", create_missing=True)
+    # Exact registration keeps each club.
+    resolver = team_resolver()
+    rangers = resolver.register("Rangers")
+    assert rangers.method == "created" and rangers.canonical == "Rangers"
+    assert rangers.entity_id != team_uuid("Queens Park Rangers")
+    assert resolver.register("Dundee United").entity_id != resolver.register("Dundee").entity_id
+    assert resolver.register("Gent").entity_id != resolver.register("Genk").entity_id
+    # Once registered, the same spelling resolves exactly by either path, and known names stay known.
+    assert resolver.resolve("Rangers").entity_id == rangers.entity_id
+    assert resolver.register("Rangers").method == "exact"
+    assert resolver.register("Man U").canonical == "Manchester United" and resolver.register("Man U").method == "alias"
 
 
 def test_uuid_is_deterministic():

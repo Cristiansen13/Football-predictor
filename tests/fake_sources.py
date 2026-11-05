@@ -57,7 +57,15 @@ def fixtures() -> pd.DataFrame:
 # -- Football-Data.co.uk ------------------------------------------------------
 
 
-def football_data_csv() -> str:
+# A league outside England, in Football-Data's own spellings: two of these
+# names would be swallowed by the English register if they were fuzzy-matched
+# ("Rangers" by Queens Park Rangers, "Dundee" by Dundee United).
+SCOTTISH = dict(zip(TEAMS, ["Celtic", "Rangers", "Dundee", "Dundee United"]))
+
+
+def football_data_csv(division: str = "E0", names: dict[str, str] | None = None) -> str:
+    """The toy season as a Football-Data file of ``division``; ``names`` maps each club to its spelling."""
+    names = names or {club: spelling["fd"] for club, spelling in CLUBS.items()}
     header = ("Div,Date,Time,HomeTeam,AwayTeam,FTHG,FTAG,FTR,HS,AS,HST,AST,B365H,B365D,B365A,"
               "PSH,PSD,PSA,AvgH,AvgD,AvgA,B365CH,B365CD,B365CA,PSCH,PSCD,PSCA,AvgCH,AvgCD,AvgCA,"
               "B365>2.5,B365<2.5,P>2.5,P<2.5,PC>2.5,PC<2.5,AvgC>2.5,AvgC<2.5,"
@@ -80,7 +88,7 @@ def football_data_csv() -> str:
         books = (f"2.12,3.42,3.58,2.09,3.38,3.62,2.16,3.60,3.95,2.06,3.50,3.85,{wh_home},3.50,3.80,2.14,3.70,4.00,"
                  f"{max(wh_home, 2.14)},3.70,4.00,1.93,2.00,1.95,2.05,1.96,1.96,1.99,1.98")
         lines.append(
-            f"E0,{row.kickoff:%d/%m/%Y},{row.kickoff:%H:%M},{CLUBS[row.home]['fd']},{CLUBS[row.away]['fd']},"
+            f"{division},{row.kickoff:%d/%m/%Y},{row.kickoff:%H:%M},{names[row.home]},{names[row.away]},"
             f"{int(row.home_goals)},{int(row.away_goals)},{ftr},12,9,5,3,{odds},{handicap},{books}"
         )
     return "\n".join(lines) + "\n" + "," * 79 + "\n"  # trailing blank row like the real files
@@ -335,6 +343,7 @@ class FakeClient:
         self.pages = {
             "https://www.football-data.co.uk/mmz4281/2324/E0.csv": football_data_csv(),
             "https://www.football-data.co.uk/mmz4281/2324/E1.csv": championship_csv(),
+            "https://www.football-data.co.uk/mmz4281/2324/SC0.csv": football_data_csv("SC0", SCOTTISH),
             "https://www.football-data.co.uk/fixtures.csv": fixtures_csv(),
             understat.LEAGUE_URL.format(season=SEASON): understat_league_html(),
             fbref.SCHEDULE_URL.format(label=label): fbref_schedule_html(),

@@ -48,8 +48,16 @@ backtest-market:    ## price-shopping benchmark: Pinnacle closing as fair value,
 	$(CLI) backtest --features lineup --xi 0.003 --xg-weight 0.6 --fair market --price max --ev-threshold 0.02 --test-seasons 2019-2025
 
 BOOKS ?= named
-shop:               ## the same benchmark without a model, over the bookmakers Football-Data names (BOOKS=max|named|soft|exchange|list)
-	$(CLI) shop --seasons 2019-2025 --books $(BOOKS) --ev-threshold 0.02 --each-book
+DIVISIONS ?= E0
+shop:               ## the same benchmark without a model, over the bookmakers Football-Data names (BOOKS=max|named|soft|exchange|list, DIVISIONS=E0|all|codes)
+	$(CLI) shop --seasons 2019-2025 --divisions $(DIVISIONS) --books $(BOOKS) --ev-threshold 0.02 --each-book
+
+shop-favourites:    ## the one rule that held up across eighteen leagues: soft books against Pinnacle closing, odds up to 3, any positive EV
+	$(CLI) shop --seasons 2019-2025 --divisions all --books soft --markets 1x2 --max-odds 3 --ev-threshold 0
+
+LEAGUES ?= E2 E3 SC0 D1 D2 SP1 SP2 I1 I2 F1 F2 N1 B1 P1 T1 G1
+data-leagues:       ## results and every bookmaker's prices for the other leagues Football-Data covers (no model data)
+	$(CLI) ingest --sources football_data --divisions $(LEAGUES) --seasons 2019-$(shell date +%Y) --no-upcoming
 
 predict:            ## this week's fixtures with probabilities and EV
 	$(CLI) predict --upcoming 7 --features lineup
