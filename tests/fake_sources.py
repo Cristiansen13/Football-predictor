@@ -122,9 +122,95 @@ def fixtures_csv() -> str:
         "0.25,1.90,2.00,1.92,1.98\n"
         "E0,16/09/2023,17:00,Nott'm Forest,Man City,9.00,5.50,1.33,9.50,5.60,1.35,8.80,5.40,1.32,1.60,2.35,"
         "1.5,1.98,1.92,2.00,1.90\n"
-        "SC0,16/09/2023,15:00,Celtic,Rangers,1.80,3.80,4.20,1.82,3.85,4.30,1.79,3.75,4.10,1.70,2.15,"
+        "SC0,16/09/2023,15:00,Dundee,Rangers,1.80,3.80,4.20,1.82,3.85,4.30,1.79,3.75,4.10,1.70,2.15,"
         "-0.5,1.85,2.05,1.87,2.03\n"
     )
+
+
+# -- The Odds API ------------------------------------------------------------------
+
+
+ODDS_API_SPORTS = {"soccer_epl": "E0", "soccer_spl": "SC0"}
+# The API spells the English clubs in full and the Scottish ones as Football-Data does.
+ODDS_API_NAMES = {"Wolves": "Wolverhampton Wanderers", "Man United": "Manchester United",
+                  "Nott'm Forest": "Nottingham Forest", "Man City": "Manchester City",
+                  "Celtic": "Celtic", "Dundee": "Dundee", "Rangers": "Rangers"}
+# Per fixture (as fixtures_csv lists them): Pinnacle, then a later Pinnacle price
+# nearer kickoff (the favourite shortens), William Hill and BetVictor.
+ODDS_API_PRICES = {
+    ("E0", "Wolves", "Man United", "2023-09-16T14:00:00Z"): {
+        "pinnacle": (3.20, 3.55, 2.35), "closing": (3.35, 3.60, 2.25),
+        "williamhill": (3.10, 3.50, 2.50), "betvictor": (3.00, 3.40, 2.40)},
+    ("E0", "Nott'm Forest", "Man City", "2023-09-16T16:00:00Z"): {
+        "pinnacle": (9.50, 5.60, 1.35), "closing": (10.0, 5.80, 1.32),
+        "williamhill": (9.00, 5.50, 1.33), "betvictor": (8.50, 5.25, 1.40)},
+    ("SC0", "Dundee", "Rangers", "2023-09-16T14:00:00Z"): {
+        "pinnacle": (1.82, 3.85, 4.30), "closing": (1.78, 3.90, 4.40),
+        "williamhill": (1.80, 3.60, 4.20), "betvictor": (1.95, 3.50, 3.80)},
+}
+
+
+def odds_api_events(division: str = "E0", *, closing: bool = False, bookmakers=None) -> list[dict]:
+    """The toy league's unplayed fixtures as The Odds API lists them, under its own spellings.
+
+    ``closing`` serves Pinnacle's later price; ``bookmakers`` limits the books
+    served (by their API keys), as the API does.
+    """
+    events = []
+    for k, ((div, home, away, kickoff), prices) in enumerate(ODDS_API_PRICES.items()):
+        if div != division:
+            continue
+        home_name, away_name = ODDS_API_NAMES[home], ODDS_API_NAMES[away]
+        books = []
+        for key, title in (("pinnacle", "Pinnacle"), ("williamhill", "William Hill"), ("betvictor", "Bet Victor")):
+            if bookmakers is not None and key not in bookmakers:
+                continue
+            h, d, a = prices["closing"] if key == "pinnacle" and closing else prices[key]
+            books.append({"key": key, "title": title, "last_update": "2023-09-14T09:55:00Z",
+                          "markets": [{"key": "h2h", "last_update": "2023-09-14T09:55:00Z", "outcomes": [
+                              {"name": home_name, "price": h}, {"name": away_name, "price": a},
+                              {"name": "Draw", "price": d}]}]})
+        events.append({"id": f"evt{div}{k}", "sport_key": next(s for s, d in ODDS_API_SPORTS.items() if d == div),
+                       "sport_title": div, "commence_time": kickoff, "home_team": home_name, "away_team": away_name,
+                       "bookmakers": books})
+    return events
+
+
+class FakeOddsResponse:
+    def __init__(self, status_code: int, payload, headers: dict | None = None) -> None:
+        self.status_code, self._payload, self.headers = status_code, payload, headers or {}
+        self.text = json.dumps(payload)
+
+    def json(self):
+        return self._payload
+
+
+class FakeOddsSession:
+    """Serves the toy events under the API's URL layout and counts credits as it does (ten bookmakers per credit)."""
+
+    def __init__(self, *, closing: bool = False, remaining: int = 500) -> None:
+        self.closing, self.remaining, self.used = closing, remaining, 0
+        self.requests: list[tuple[str, dict]] = []
+        self.headers: dict = {}
+
+    def get(self, url: str, params=None, timeout=None) -> FakeOddsResponse:
+        params = dict(params or {})
+        self.requests.append((url, params))
+        if params.get("apiKey") != "test-key":
+            return FakeOddsResponse(401, {"message": "Invalid api key"})
+        path = url.split("/v4/")[1].strip("/")
+        if path == "sports":
+            return FakeOddsResponse(200, [{"key": key, "active": True} for key in ODDS_API_SPORTS])
+        sport = path.split("/")[1]
+        if sport not in ODDS_API_SPORTS:
+            return FakeOddsResponse(404, {"message": "Unknown sport"})
+        books = [b for b in params.get("bookmakers", "").split(",") if b]
+        cost = max(1, -(-len(books) // 10))
+        self.used += cost
+        self.remaining -= cost
+        events = odds_api_events(ODDS_API_SPORTS[sport], closing=self.closing, bookmakers=books)
+        return FakeOddsResponse(200, events, {"x-requests-remaining": str(self.remaining),
+                                              "x-requests-used": str(self.used), "x-requests-last": str(cost)})
 
 
 # -- Understat -----------------------------------------------------------------

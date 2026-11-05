@@ -59,5 +59,14 @@ LEAGUES ?= E2 E3 SC0 D1 D2 SP1 SP2 I1 I2 F1 F2 N1 B1 P1 T1 G1
 data-leagues:       ## results and every bookmaker's prices for the other leagues Football-Data covers (no model data)
 	$(CLI) ingest --sources football_data --divisions $(LEAGUES) --seasons 2019-$(shell date +%Y) --no-upcoming
 
+log-prices:         ## log the coming fixtures' prices before kickoff (The Odds API needs ODDS_API_KEY; one credit per league) and record the rule's bets
+	$(CLI) log-prices
+
+board:              ## the live value board from the logged prices: soft favourites against Pinnacle
+	$(CLI) board
+
+forward-test:       ## settle the ledger of paper bets against the results loaded (make data data-leagues) and the closing prices logged
+	$(CLI) forward-test
+
 predict:            ## this week's fixtures with probabilities and EV
 	$(CLI) predict --upcoming 7 --features lineup

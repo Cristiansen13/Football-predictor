@@ -192,7 +192,8 @@ def summarize(bets: pd.DataFrame, *, n_resamples: int = 2000, seed: int = 0) -> 
     return out
 
 
-def _table(bets: pd.DataFrame, by: str, *, n_resamples: int) -> pd.DataFrame:
+def summarize_by(bets: pd.DataFrame, by: str, *, n_resamples: int = 2000) -> pd.DataFrame:
+    """One :func:`summarize` row per value of column ``by``."""
     rows = [{by: key, **summarize(group, n_resamples=n_resamples)} for key, group in bets.groupby(by, sort=True)]
     return pd.DataFrame(rows)
 
@@ -312,10 +313,10 @@ def price_shopping(
     return ShoppingResult(
         bets=bets,
         metrics=summarize(bets, n_resamples=n_resamples),
-        by_season=_table(bets, "season", n_resamples=n_resamples),
-        by_market=_table(bets, "market", n_resamples=n_resamples),
-        by_bookmaker=_table(bets, "bookmaker", n_resamples=n_resamples),
-        by_division=_table(bets, "division", n_resamples=n_resamples) if "division" in bets else pd.DataFrame(),
+        by_season=summarize_by(bets, "season", n_resamples=n_resamples),
+        by_market=summarize_by(bets, "market", n_resamples=n_resamples),
+        by_bookmaker=summarize_by(bets, "bookmaker", n_resamples=n_resamples),
+        by_division=summarize_by(bets, "division", n_resamples=n_resamples) if "division" in bets else pd.DataFrame(),
         coverage=coverage,
     )
 

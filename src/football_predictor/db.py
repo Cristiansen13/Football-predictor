@@ -115,6 +115,48 @@ CREATE TABLE IF NOT EXISTS handicap_odds (
     PRIMARY KEY (match_id, bookmaker, market_time)
 );
 
+-- Prices logged before kickoff: the live counterpart of ``odds``, with the
+-- time of collection. Fixtures are keyed by the source's own id and carry the
+-- warehouse match_id once both club names resolve; times are UTC.
+CREATE TABLE IF NOT EXISTS price_snapshots (
+    snapshot_at  TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    division     TEXT NOT NULL,
+    event_id     TEXT NOT NULL,
+    kickoff_utc  TEXT NOT NULL,
+    home_name    TEXT NOT NULL,
+    away_name    TEXT NOT NULL,
+    match_id     TEXT,
+    bookmaker    TEXT NOT NULL,
+    home         REAL NOT NULL,
+    draw         REAL NOT NULL,
+    away         REAL NOT NULL,
+    PRIMARY KEY (snapshot_at, source, event_id, bookmaker)
+);
+CREATE INDEX IF NOT EXISTS price_snapshots_by_match ON price_snapshots (match_id, bookmaker, snapshot_at);
+CREATE INDEX IF NOT EXISTS price_snapshots_by_event ON price_snapshots (source, event_id);
+
+-- The forward test's ledger: the bet a rule picked the first time a fixture
+-- qualified, as it stood then (price, fair value, EV); settled later against
+-- ``matches`` and valued against the fair bookmaker's last logged price.
+CREATE TABLE IF NOT EXISTS paper_bets (
+    rule         TEXT NOT NULL,
+    match_id     TEXT NOT NULL,
+    placed_at    TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    division     TEXT NOT NULL,
+    kickoff_utc  TEXT NOT NULL,
+    home_name    TEXT NOT NULL,
+    away_name    TEXT NOT NULL,
+    selection    TEXT NOT NULL CHECK (selection IN ('home', 'draw', 'away')),
+    bookmaker    TEXT NOT NULL,
+    odds         REAL NOT NULL,
+    fair_book    TEXT NOT NULL,
+    p_fair       REAL NOT NULL,
+    ev           REAL NOT NULL,
+    PRIMARY KEY (rule, match_id)
+);
+
 CREATE TABLE IF NOT EXISTS player_ratings (
     player_id      TEXT NOT NULL,
     player_name    TEXT NOT NULL,
@@ -455,6 +497,120 @@ class Database:
         for table in ("odds", "totals_odds", "handicap_odds"):
             names |= set(self.query(f"SELECT DISTINCT bookmaker FROM {table}")["bookmaker"])
         return sorted(names)
+
+    # -- live prices and the paper-trading ledger ---------------------------
+
+    def upsert_price_snapshots(self, frame: pd.DataFrame) -> None:
+        """Rows in :data:`etl.odds_api.SNAPSHOT_FIELDS` plus ``match_id`` (None where unresolved)."""
+        if frame.empty:
+            return
+        frame = frame.assign(snapshot_at=frame["snapshot_at"].map(_iso), kickoff_utc=frame["kickoff_utc"].map(_iso))
+        columns = ["snapshot_at", "source", "division", "event_id", "kickoff_utc", "home_name", "away_name",
+                   "match_id", "bookmaker", "home", "draw", "away"]
+        self._upsert("price_snapshots", ["snapshot_at", "source", "event_id", "bookmaker"], frame[columns])
+
+    def fill_snapshot_match_ids(self, source: str, event_id: str, match_id: str) -> int:
+        """Attach ``match_id`` to earlier snapshots of a fixture whose names resolve only now."""
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE price_snapshots SET match_id = ? WHERE source = ? AND event_id = ? AND match_id IS NULL",
+                (match_id, source, event_id),
+            )
+        return cursor.rowcount
+
+    def load_price_snapshots(
+        self,
+        *,
+        kickoff_from=None,
+        kickoff_to=None,
+        match_ids: Iterable[str] | None = None,
+        bookmaker: str | None = None,
+    ) -> pd.DataFrame:
+        """Logged prices, timestamps parsed, oldest snapshot first."""
+        clauses, params = [], []
+        if kickoff_from is not None:
+            clauses.append("kickoff_utc >= ?")
+            params.append(_iso(kickoff_from))
+        if kickoff_to is not None:
+            clauses.append("kickoff_utc < ?")
+            params.append(_iso(kickoff_to))
+        if bookmaker is not None:
+            clauses.append("bookmaker = ?")
+            params.append(bookmaker)
+        if match_ids is not None:
+            ids = list(dict.fromkeys(match_ids))
+            if not ids:
+                return pd.DataFrame(columns=["snapshot_at", "source", "division", "event_id", "kickoff_utc",
+                                             "home_name", "away_name", "match_id", "bookmaker", "home", "draw", "away"])
+            clauses.append(f"match_id IN ({', '.join('?' * len(ids))})")
+            params.extend(ids)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        frame = self.query(f"SELECT * FROM price_snapshots{where} ORDER BY snapshot_at, source, event_id, bookmaker",
+                           params)
+        for column in ("snapshot_at", "kickoff_utc"):
+            frame[column] = pd.to_datetime(frame[column])
+        return frame
+
+    def insert_paper_bets(self, frame: pd.DataFrame) -> int:
+        """Record bets; a fixture already in the ledger for the rule keeps its first bet. Returns the number added."""
+        if frame.empty:
+            return 0
+        columns = ["rule", "match_id", "placed_at", "source", "division", "kickoff_utc", "home_name", "away_name",
+                   "selection", "bookmaker", "odds", "fair_book", "p_fair", "ev"]
+        frame = frame.assign(placed_at=frame["placed_at"].map(_iso), kickoff_utc=frame["kickoff_utc"].map(_iso))
+        rows = [tuple(_none_if_na(v) for v in row) for row in frame[columns].itertuples(index=False)]
+        with self.transaction() as conn:
+            before = conn.total_changes
+            conn.executemany(
+                f"INSERT OR IGNORE INTO paper_bets ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})", rows
+            )
+            return conn.total_changes - before
+
+    def load_paper_bets(self, rule: str | None = None) -> pd.DataFrame:
+        """The ledger with the result where the match has been played (goals NULL otherwise)."""
+        where, params = ("WHERE b.rule = ?", [rule]) if rule else ("", [])
+        frame = self.query(
+            f"""SELECT b.*, m.home_goals, m.away_goals, m.kickoff AS kickoff_local
+                FROM paper_bets b LEFT JOIN matches m ON m.match_id = b.match_id
+                {where} ORDER BY b.kickoff_utc, b.placed_at""",
+            params,
+        )
+        for column in ("placed_at", "kickoff_utc"):
+            frame[column] = pd.to_datetime(frame[column])
+        for column in ("home_goals", "away_goals"):
+            frame[column] = frame[column].astype("Int64")
+        return frame
+
+    def division_clubs(self, division: str, seasons: Iterable[int]) -> dict[str, list[str]]:
+        """Every club with a fixture in ``division`` in ``seasons``: team id -> canonical name and aliases."""
+        seasons = list(seasons)
+        if not seasons:
+            return {}
+        marks = ", ".join("?" * len(seasons))
+        teams = self.query(
+            f"""SELECT DISTINCT t.team_id, t.canonical_name FROM matches m
+                JOIN teams t ON t.team_id IN (m.home_team_id, m.away_team_id)
+                WHERE m.division = ? AND m.season IN ({marks})""",
+            [division, *seasons],
+        )
+        clubs = {row.team_id: [row.canonical_name] for row in teams.itertuples(index=False)}
+        if clubs:
+            ids = list(clubs)
+            aliases = self.query(
+                f"SELECT alias, team_id FROM team_aliases WHERE team_id IN ({', '.join('?' * len(ids))})", ids
+            )
+            for row in aliases.itertuples(index=False):
+                if row.alias not in clubs[row.team_id]:
+                    clubs[row.team_id].append(row.alias)
+        return clubs
+
+    def team_id_by_name(self, name: str) -> str | None:
+        """The team whose canonical name or any stored alias is ``name``."""
+        found = self.query(
+            "SELECT team_id FROM teams WHERE canonical_name = ? UNION SELECT team_id FROM team_aliases WHERE alias = ?",
+            [name, name],
+        )
+        return str(found["team_id"].iloc[0]) if len(found) else None
 
     def upsert_player_ratings(self, frame: pd.DataFrame) -> None:
         self._upsert("player_ratings", ["player_id", "snapshot_date"], frame)

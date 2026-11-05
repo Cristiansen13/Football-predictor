@@ -40,6 +40,9 @@ make backtest          # tune ξ and xG weight on the two previous seasons, test
 make backtest-rolling  # one walk-forward over 2021/22-2025/26: five seasons of scored matches, per-season table
 make backtest-market   # price-shopping benchmark: the sharp closing line as fair value, bet the best price
 make shop              # the same benchmark without a model, over the bookmakers the data names (BOOKS=max|named|soft|exchange, DIVISIONS=E0|all)
+make log-prices        # log the coming fixtures' prices before kickoff (ODDS_API_KEY; one credit per league) and the rule's picks
+make board             # the live value board: soft favourites against Pinnacle's latest logged price
+make forward-test      # settle the paper bets against the results loaded and the closing prices logged
 make predict           # this week's fixtures: probabilities, EV against current prices
 ```
 
@@ -55,6 +58,9 @@ Each target is a thin wrapper around the CLI:
 | `football-predictor scan [--upcoming DAYS] [--fair anchored\|model] [--ev-threshold X] [--commission C]` | value board: every bookmaker's price on the coming fixtures (1X2, over/under, Asian handicap) against the fair value, with EV and Kelly stake; the exchange's prices net of commission |
 | `football-predictor backtest [--test-season Y \| --test-seasons A-B] [--tune] [--compare] [--markets 1x2 totals] [--fair model\|market\|blend] [--price closing\|opening\|max] [--books named]` | walk-forward evaluation and betting simulation, 1X2 and over/under 2.5; `--books` takes the best price over chosen bookmakers instead of the market maximum |
 | `football-predictor shop [--seasons A-B] [--divisions E0 …\|all] [--books max\|named\|soft\|exchange\|list] [--fair-book pinnacle] [--market-time closing\|opening] [--ev-threshold X] [--max-odds X] [--each-book]` | price shopping without a model: the sharp line as fair value, the bet wherever the chosen bookmakers beat it, at closing or at Football-Data's earlier prices; returns, bootstrap intervals and closing-line value by division, season, market and bookmaker |
+| `football-predictor log-prices [--sources odds_api football_data] [--divisions all\|codes] [--bookmakers keys] [--alias "Name=Club"] [--max-odds 3] [--ev-threshold 0]` | log the coming fixtures' 1X2 prices before kickoff from The Odds API (Pinnacle and nine soft books; key in `ODDS_API_KEY`) and Football-Data's fixtures file, resolve the clubs to the warehouse, record the rule's bet per fixture in the ledger |
+| `football-predictor board [--days 7] [--every-price]` | the live value board from the logged prices: soft prices against Pinnacle's latest de-margined price, the age of each price, the ledger's bets marked |
+| `football-predictor forward-test [--rule favourites]` | settle the ledger against the results loaded and value each bet at Pinnacle's last price logged before kickoff: return, interval, EV, closing-line value and hit rate per league, bookmaker, selection and price source; pending bets listed |
 
 Reports go to `data/reports/` (`metrics_<season>.json`, predictions, bets,
 calibration table, PnL curve and reliability diagram). Use `--data-dir` to move them.
@@ -559,7 +565,67 @@ are the usual two and one new one: the prices are closing prices, reachable
 only in the last minutes before kickoff; bookmakers restrict accounts that do
 this; and Football-Data no longer lists Pinnacle, so a live version of the
 rule needs the sharp price from somewhere else (`scan` falls back to the
-market average, which forecasts as well but moves the thresholds).
+market average, which forecasts as well but moves the thresholds; the forward
+test below takes Pinnacle from The Odds API).
+
+### Forward test: the rule run on prices logged before kickoff
+
+A backtest on closing prices settles what the rule *would have* returned.
+Whether those prices were there to be taken, at the time, is another
+question, and Football-Data cannot answer it: its files arrive after the
+match and no longer carry Pinnacle. So the rule now runs forward, on prices
+logged before kickoff, with a ledger of what it picked.
+
+* **`log-prices`** fetches the coming fixtures' 1X2 prices from
+  [The Odds API](https://the-odds-api.com), Pinnacle and nine soft
+  bookmakers in one request per league (William Hill, BetVictor, 1xBet, Sky
+  Bet, Paddy Power, Ladbrokes, Coral, Betfred, Betway), and from
+  Football-Data's `fixtures.csv`, the soft books the API does not list
+  (Bet365, bwin, and whichever others the file names that week). Every price
+  is stored with its time of collection in `price_snapshots`, and the rule's
+  pick per fixture goes to `paper_bets` the first time the fixture qualifies,
+  at the price and fair value of that moment; later runs add prices, never a
+  second bet on the fixture. The key is read from the `ODDS_API_KEY`
+  environment variable and written nowhere. Every ten bookmakers cost one
+  credit per league, so a run over the eighteen leagues costs eighteen of the
+  free plan's 500 a month: a run before each round, all season, fits.
+* **Clubs across sources.** The API spells clubs its own way ("Borussia
+  Dortmund", "Atlético Madrid", "Paris Saint Germain", "Inter Milan"). A
+  matcher scoped to one league (`ClubMatcher`) pairs a spelling with the
+  warehouse's club by the tokens the two names share, each token weighted by
+  how few of the league's clubs carry it (so "City" counts for little in the
+  Championship and "Hull" for everything), tokens matching when equal, by
+  prefix ("Ath" / "Atlético"), by a long suffix ("gladbach" /
+  "Mönchengladbach"), by near-identity ("Olympiacos" / "Olympiakos") or as
+  initials ("SG" / "Saint Germain"). Tried against 249 spellings in the API's
+  style for this season's clubs it resolved 244; the rest are seeded ("Stade
+  Rennais", "FC Cologne") or taught with `--alias "Name=Club"`. A match is
+  stored as an alias, so it holds and can be corrected. A fixture whose names
+  do not resolve is logged but not bet, since it could not be settled.
+* **`board`** is the live value board from the latest logged prices: every
+  soft price the rule would bet (all of them with `--every-price`), its EV
+  against Pinnacle's latest de-margined price, the age of the price and
+  whether the ledger already holds the fixture.
+* **`forward-test`** settles the ledger against the results loaded by
+  `make data data-leagues`, flat stakes at the price taken, and values each
+  bet at Pinnacle's last price logged before kickoff: return, bootstrap
+  interval, EV at the time, closing-line value and hit rate, per league,
+  bookmaker, selection and price source, with the pending bets listed and the
+  whole ledger written to `data/reports/forward_test_favourites.csv`.
+
+The run should sit close to kickoff. The eighteen-league study found the
+edge in the soft line's staleness at closing, not in being early, so a run an
+hour or two before each round is worth more than one days ahead, and each
+bet's closing-line value tells how far the logged price sat from the closing
+one. At +2.7% a bet with a standard deviation near one unit the ledger needs
+several hundred bets before its interval excludes zero: at a round a week
+across eighteen leagues, a few months. What the test can show that the
+backtest could not is whether the API's soft bookmakers hold the prices
+Football-Data's did, whether a logged price is still there at closing, and
+how far the return drifts from +2.7% out of sample in time rather than in
+leagues. The first run on 5 November 2026, Football-Data's file alone,
+logged 132 prices on 17 fixtures with every club resolved and, without a
+sharp price in that file, bet nothing.
 
 ## Caveats
 
@@ -582,7 +648,8 @@ market average, which forecasts as well but moves the thresholds).
   for 210 fixtures), so the closing reference, the market-anchored forecast
   and the `scan` fair value use the market average there, which forecasts as
   well (see the bookmaker bullet above); `shop --fair-book betfair_exchange`
-  judges the same strategy against the exchange's closing price instead.
+  judges the same strategy against the exchange's closing price instead, and
+  the live rule (`log-prices`) takes Pinnacle from The Odds API.
   Which bookmakers a season file names changes every year or two; the loader
   takes whatever columns are present (`BOOKMAKERS` in `etl/football_data.py`).
 
@@ -593,9 +660,11 @@ make test
 ```
 
 The suite covers entity resolution (including exact registration of clubs
-outside England), all parsers (including the Understat JSON-endpoint
-fallback, Football-Data fixtures, every bookmaker code its files have used
-and its stray zero prices), anti-bot detection and browser fallback, the full ETL →
+outside England and the league-scoped matcher that pairs The Odds API's
+spellings with the warehouse's clubs), all parsers (including the Understat
+JSON-endpoint fallback, Football-Data fixtures, every bookmaker code its
+files have used and its stray zero prices, and The Odds API's events and
+quota), anti-bot detection and browser fallback, the full ETL →
 SQL → feature path on fake sources, schema migration, SOFIFA resume,
 data-quality checks, the leakage audit, parameter recovery, xG weighting and
 the promoted-club benefit on simulated leagues, gradient checks, scoring

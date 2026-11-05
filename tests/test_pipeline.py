@@ -92,7 +92,7 @@ def test_upcoming_fixtures_carry_current_prices(loaded_db):
     assert (upcoming["odds_market_time"] == "opening").all()
     wolves = upcoming[upcoming["home_team"] == "Wolverhampton Wanderers"].iloc[0]
     assert wolves["odds_home"] == pytest.approx(3.20)  # Pinnacle preferred over Bet365 and average
-    assert "Celtic" not in set(db.query("SELECT canonical_name FROM teams")["canonical_name"])
+    assert not {"Dundee", "Rangers"} & set(db.query("SELECT canonical_name FROM teams")["canonical_name"])
 
 
 def test_unplayed_fixtures_and_schedule(loaded_db):

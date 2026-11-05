@@ -296,3 +296,152 @@ def team_resolver(**kwargs) -> FuzzyMatcher:
 def player_resolver(names: Iterable[str], **kwargs) -> FuzzyMatcher:
     kwargs.setdefault("threshold", 0.8)
     return FuzzyMatcher(names, kind="player", **kwargs)
+
+
+# -- the clubs of one league under another source's spelling --------------------
+
+# Legal forms, city prefixes and other tokens one source writes and another
+# drops ("FC Augsburg" / "Augsburg", "Stade de Reims" / "Reims").
+CLUB_STOPWORDS = TEAM_STOPWORDS | {
+    "sc", "ac", "as", "us", "ss", "ssc", "rc", "rcd", "cd", "ud", "sd", "ca", "cp", "bc", "bk", "fk", "sk", "if",
+    "sv", "vfl", "vfb", "tsg", "tsv", "fsv", "bsc", "kv", "kvc", "krc", "kaa", "ksv", "rsc", "royal", "ogc", "aj",
+    "ea", "es", "usl", "hsc", "sco", "af", "foot", "calcio", "spa", "ssd", "asd", "de", "del", "di", "la", "le",
+    "les", "fcv", "eh", "ev", "of",
+}
+CLUB_ABBREVIATIONS = TEAM_ABBREVIATIONS | {"nott": "nottingham", "saint": "st", "sint": "st", "sporting": "sp",
+                                           "atletico": "ath", "athletic": "ath"}
+
+
+def club_tokens(name: str) -> list[str]:
+    """The informative tokens of a club name: accents stripped, apostrophes and
+    hyphens split ("M'gladbach" -> gladbach), abbreviations expanded, legal
+    forms, numbers and single letters dropped."""
+    text = strip_accents(str(name)).lower().replace("&", " and ")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    tokens = []
+    for token in text.split():
+        for part in CLUB_ABBREVIATIONS.get(token, token).split():
+            if part in CLUB_STOPWORDS or part.isdigit() or len(part) < 2:
+                continue
+            tokens.append(part)
+    return tokens
+
+
+def _club_tokens_match(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    if len(short) >= 3 and long.startswith(short):  # "ath" / "atletico", "lyon" / "lyonnais"
+        return True
+    if len(short) >= 5 and long.endswith(short):  # "gladbach" / "monchengladbach"
+        return True
+    return len(short) >= 5 and levenshtein_similarity(a, b) >= 0.8  # "olympiakos" / "olympiacos"
+
+
+def _initials(tokens: list[str], others: list[str]) -> dict[int, list[int]]:
+    """Positions of short tokens that spell the initials of consecutive ``others`` ("sg" / "saint germain")."""
+    found = {}
+    for i, token in enumerate(tokens):
+        if not 2 <= len(token) <= 3:
+            continue
+        for j in range(len(others) - len(token) + 1):
+            if "".join(o[0] for o in others[j:j + len(token)]) == token:
+                found[i] = list(range(j, j + len(token)))
+                break
+    return found
+
+
+def club_overlap(query: list[str], candidate: list[str], weight: dict[str, float] | None = None) -> float:
+    """How much of each of two club spellings the other covers, averaged, in [0, 1].
+
+    Tokens pair up when equal, when one is a prefix or a long suffix of the
+    other, when they are near-identical, or when one spells the initials of
+    consecutive tokens of the other. Each side's coverage is the ``weight``
+    (default 1) of its matched tokens over that of all its tokens; an
+    unmatched token of the query that no candidate carries weighs half, since
+    it says nothing about which club is meant ("Hellas", "Borussia"). The
+    candidate's own coverage counts as much as the query's, so "Real Betis"
+    covers "Betis" whole and "Real Madrid" by half.
+    """
+    weight = weight or {}
+    if not query or not candidate:
+        return 0.0
+    pairs = {(i, j) for i, q in enumerate(query) for j, c in enumerate(candidate) if _club_tokens_match(q, c)}
+    for i, js in _initials(query, candidate).items():
+        pairs |= {(i, j) for j in js}
+    for j, is_ in _initials(candidate, query).items():
+        pairs |= {(i, j) for i in is_}
+    matched_q = {i: weight.get(candidate[j], weight.get(query[i], 1.0)) for i, j in pairs}
+    matched_c = {j: weight.get(candidate[j], 1.0) for _, j in pairs}
+    total_q = sum(matched_q.get(i, weight.get(q, 0.5)) for i, q in enumerate(query))
+    total_c = sum(matched_c.get(j, weight.get(c, 1.0)) for j, c in enumerate(candidate))
+    return 0.5 * (sum(matched_q.values()) / total_q + sum(matched_c.values()) / total_c)
+
+
+class ClubMatcher:
+    """Match another source's spellings against the clubs of one league.
+
+    ``clubs`` maps each team id to its known names (canonical and aliases).
+    A name is scored against every club by :func:`club_overlap`, with each
+    token weighted by the inverse of the number of clubs that carry it, so
+    "city" in a league of six Cities counts for little and "hull" for
+    everything. A name resolves when the best club scores at least
+    ``threshold`` and beats the runner-up by ``margin``; agreeing on the first
+    token adds ``first_token_bonus``, which settles "Inter Milan" for Inter
+    rather than Milan. A spelling no token can bridge ("Stade Rennais" for
+    Rennes) stays unresolved and is left to an alias.
+    """
+
+    def __init__(
+        self,
+        clubs: dict[str, Iterable[str]],
+        *,
+        threshold: float = 0.5,
+        margin: float = 0.05,
+        first_token_bonus: float = 0.05,
+    ) -> None:
+        self.threshold, self.margin, self.first_token_bonus = threshold, margin, first_token_bonus
+        self._raw = {team: [str(n) for n in names] for team, names in clubs.items()}
+        self._names = {team: [club_tokens(n) for n in names] for team, names in clubs.items()}
+        self._names = {team: [t for t in tokens if t] for team, tokens in self._names.items()}
+        carriers: dict[str, set[str]] = {}
+        for team, spellings in self._names.items():
+            for tokens in spellings:
+                for token in tokens:
+                    carriers.setdefault(token, set()).add(team)
+        self._weight = {token: 1.0 / len(teams) for token, teams in carriers.items()}
+
+    def candidates(self, name: str, limit: int = 3) -> list[tuple[str, float]]:
+        """Best clubs with their score, highest first."""
+        query = club_tokens(name)
+        scored = []
+        for team, spellings in self._names.items():
+            best = 0.0
+            for tokens in spellings:
+                score = club_overlap(query, tokens, self._weight)
+                if score and query and tokens and _club_tokens_match(query[0], tokens[0]):
+                    score += self.first_token_bonus
+                best = max(best, score)
+            if best > 0:
+                scored.append((team, best))
+        return sorted(scored, key=lambda kv: -kv[1])[:limit]
+
+    def match(self, name: str) -> tuple[str, float] | None:
+        """(team id, score) of the club ``name`` denotes, or None when no club clearly does.
+
+        A tie between clubs is settled for the one spelt exactly like
+        ``name``, if there is one: a club a source has registered twice
+        ("Mechelen", then "KV Mechelen") resolves to its current spelling.
+        """
+        ranked = self.candidates(name, limit=2)
+        if not ranked:
+            return None
+        team, score = ranked[0]
+        runner_up = ranked[1][1] if len(ranked) > 1 else 0.0
+        if score >= self.threshold and score - runner_up >= self.margin - 1e-9:
+            return team, min(score, 1.0)
+        key = basic_normalize(name)
+        exact = [t for t, s in ranked if s >= self.threshold and any(basic_normalize(n) == key for n in self._raw[t])]
+        if len(exact) == 1:
+            return exact[0], 1.0
+        return None

@@ -161,6 +161,60 @@ def test_shop_evaluates_price_shopping_without_a_model(tmp_path, capsys, offline
         main(["--data-dir", str(tmp_path), "shop", "--seasons", "2023", "--books", "nosuch"])
 
 
+def test_log_prices_board_and_forward_test(tmp_path, capsys, offline, monkeypatch):
+    from football_predictor.etl.odds_api import OddsApiClient
+
+    main(["--data-dir", str(tmp_path), "ingest", "--seasons", "2023", "--sources", "football_data",
+          "--divisions", "E0", "SC0"])
+    capsys.readouterr()
+    session = fake.FakeOddsSession()
+    monkeypatch.setattr(cli, "make_odds_client", lambda args: OddsApiClient("test-key", session=session))
+    main(["--data-dir", str(tmp_path), "log-prices", "--divisions", "E0", "SC0", "EC", "--now", "2023-09-14T10:00"])
+    out = capsys.readouterr().out
+    assert "Prices logged at 2023-09-14 10:00 UTC" in out
+    assert "The Odds API: 3 fixtures in 2 leagues from 10 bookmakers (EC not covered); credits used 2, remaining 498" in out
+    assert "Football-Data fixtures.csv: 3 fixtures; bookmakers average, bet365, pinnacle" in out
+    assert "18 prices stored; 3 fixtures resolved to the warehouse, 0 listed fixture(s) not" in out
+    assert "Rule favourites: every soft bookmaker against the de-margined price of pinnacle, odds up to 3" in out
+    assert "3 fixtures qualify; 3 new in the ledger, 3 bets recorded in all" in out
+    assert "Wolverhampton Wanderers v Manchester United" in out and "william_hill" in out and "betvictor" in out
+    assert out.count(" new") >= 3
+
+    main(["--data-dir", str(tmp_path), "board", "--now", "2023-09-14T12:00", "--days", "3"])
+    out = capsys.readouterr().out
+    assert "Value board at 2023-09-14 12:00 UTC, fixtures in the next 3 days" in out
+    assert "bet_at" in out and out.count("2023-09-14 10:00") >= 3 and "age_h" in out
+    main(["--data-dir", str(tmp_path), "board", "--now", "2023-09-14T12:00", "--every-price", "--max-odds", "2"])
+    assert "bet365" in capsys.readouterr().out
+    with pytest.raises(SystemExit, match="No logged prices"):
+        main(["--data-dir", str(tmp_path), "board", "--now", "2023-10-01"])
+
+    main(["--data-dir", str(tmp_path), "forward-test", "--resamples", "10"])
+    out = capsys.readouterr().out
+    assert "Forward test of rule favourites: 3 bets recorded from 2023-09-14 to 2023-09-14 on 2 league(s); 0 settled, 3 pending" in out
+    assert "Pending (3" in out and "Dundee v Rangers" in out
+    ledger = pd.read_csv(tmp_path / "reports" / "forward_test_favourites.csv")
+    assert len(ledger) == 3 and (ledger["status"] == "pending").all()
+    with pytest.raises(SystemExit, match="No bets in the ledger"):
+        main(["--data-dir", str(tmp_path), "forward-test", "--rule", "nosuch"])
+
+
+def test_log_prices_needs_a_key_for_the_odds_api(tmp_path, capsys, offline, monkeypatch):
+    monkeypatch.delenv("ODDS_API_KEY", raising=False)
+    with pytest.raises(SystemExit, match="ODDS_API_KEY"):
+        main(["--data-dir", str(tmp_path), "log-prices"])
+    main(["--data-dir", str(tmp_path), "ingest", "--seasons", "2023", "--sources", "football_data"])
+    capsys.readouterr()
+    main(["--data-dir", str(tmp_path), "log-prices", "--sources", "football_data", "--divisions", "E0",
+          "--alias", "Wolverhampton=Wolverhampton Wanderers", "--now", "2023-09-14T10:00"])
+    out = capsys.readouterr().out
+    # Bet365's prices in fixtures.csv never beat Pinnacle's there, so nothing is bet; the prices are logged all the same.
+    assert "Football-Data fixtures.csv: 2 fixtures" in out and "No price qualifies in this snapshot" in out
+    assert "6 prices stored; 2 fixtures resolved" in out
+    with pytest.raises(SystemExit, match="expected NAME=CLUB"):
+        main(["--data-dir", str(tmp_path), "log-prices", "--sources", "football_data", "--alias", "X=No Such Club"])
+
+
 def test_shop_across_divisions_and_at_opening_prices(tmp_path, capsys, offline):
     main(["--data-dir", str(tmp_path), "ingest", "--seasons", "2023", "--sources", "football_data", "--no-upcoming",
           "--divisions", "E0", "SC0"])

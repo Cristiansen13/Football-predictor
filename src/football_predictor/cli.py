@@ -8,6 +8,9 @@
     scan           value board: every bookmaker's price on the coming fixtures against a fair value
     backtest       walk-forward test season: scoring rules, calibration, EV betting
     shop           price shopping without a model: the sharp closing line as fair value, bet where a bookmaker beats it
+    log-prices     log the coming fixtures' prices before kickoff (The Odds API, Football-Data) and record the rule's bets
+    board          the live value board from the logged prices: soft favourites against the sharp price
+    forward-test   settle the ledger of paper bets against the results and the closing prices logged
     demo           backtest on a simulated league (no network needed)
 """
 
@@ -29,9 +32,10 @@ from .config import Settings, season_from_date
 from .db import Database
 from .etl.browser import BrowserFetcher
 from .etl.entity_resolution import team_resolver
-from .etl.football_data import AGGREGATES
+from .etl.football_data import AGGREGATES, fetch_fixtures_csv, parse_fixtures_snapshot
 from .etl.football_data import DIVISIONS as LEAGUE_NAMES
 from .etl.http import HttpClient
+from .etl.odds_api import DEFAULT_BOOKMAKERS, SPORT_KEYS, OddsApiClient, OddsApiError, fetch_odds, parse_events
 from .etl.pipeline import DIVISIONS, SOURCES, Pipeline, probe_sources
 from .evaluation import (
     BettingStrategy,
@@ -47,8 +51,10 @@ from .evaluation import (
     with_best_prices,
 )
 from .evaluation.backtest import BacktestResult, evaluate_forecasts
+from .evaluation.forward import forward_test
 from .evaluation.shopping import EXCHANGE, net_exchange
 from .features import audit_point_in_time, build_features, lineup_strength, player_form_strength
+from .live import ClubResolver, Rule, board, log_prices
 from .models import FEATURE_PRESETS, DixonColesModel
 from .quality import coverage_report, validate
 from .synthetic import simulate_league
@@ -510,6 +516,177 @@ def cmd_shop(args: argparse.Namespace) -> None:
     print(f"Bets: {path}")
 
 
+# -- live prices, the board and the forward test ----------------------------------
+
+
+def make_odds_client(args: argparse.Namespace) -> OddsApiClient:
+    key = os.environ.get("ODDS_API_KEY", "")
+    if not key:
+        raise SystemExit("log-prices reads The Odds API key from the ODDS_API_KEY environment variable (a free key, "
+                         "500 credits a month, at the-odds-api.com); pass --sources football_data to log "
+                         "Football-Data's prices alone")
+    return OddsApiClient(key)
+
+
+def _now(args: argparse.Namespace) -> pd.Timestamp:
+    """The run's time, UTC, to the second (``--now`` fixes it)."""
+    if getattr(args, "now", None):
+        stamp = pd.Timestamp(args.now)
+        return stamp.tz_convert("UTC").tz_localize(None) if stamp.tzinfo is not None else stamp
+    return pd.Timestamp.now(tz="UTC").tz_localize(None).floor("s")
+
+
+def _rule(args: argparse.Namespace) -> Rule:
+    books = None if args.books == "soft" else tuple(b.strip() for b in args.books.split(",") if b.strip())
+    return Rule(name=args.rule, fair_book=args.fair_book, max_odds=args.max_odds, ev_threshold=args.ev_threshold,
+                books=books)
+
+
+def _price_table(rows: pd.DataFrame, now: pd.Timestamp | None = None) -> str:
+    """Board or ledger rows as a table: kickoff (UTC), league, match, selection, bookmaker, price, fair price, EV."""
+    shown = rows.copy()
+    shown["kickoff"] = pd.to_datetime(shown["kickoff_utc"]).dt.strftime("%a %d %b %H:%M")
+    shown["match"] = shown["home_name"] + " v " + shown["away_name"]
+    shown["fair"] = (1.0 / shown["p_fair"]).round(2)
+    shown["ev_%"] = (100 * shown["ev"]).round(1)
+    columns = ["kickoff", "division", "match", "selection", "bookmaker", "odds", "fair", "ev_%"]
+    if "age_hours" in shown:
+        shown["age_h"] = shown["age_hours"].round(1)
+        columns.append("age_h")
+    if "bet_at" in shown:
+        shown["bet_at"] = pd.to_datetime(shown["bet_at"]).dt.strftime("%Y-%m-%d %H:%M").fillna("")
+        columns.append("bet_at")
+    if "placed_at" in shown and now is not None:
+        shown["new"] = np.where(pd.to_datetime(shown["placed_at"]) == now, "new", "")
+        columns.append("new")
+    return shown[columns].to_string(index=False)
+
+
+def cmd_log_prices(args: argparse.Namespace) -> None:
+    """Log the coming fixtures' prices from each source, then record the rule's bets in the ledger."""
+    odds_client = make_odds_client(args) if "odds_api" in args.sources else None
+    db = Database(args.db)
+    now = _now(args)
+    divisions = list(SPORT_KEYS) if "all" in args.divisions else list(args.divisions)
+    rule = _rule(args)
+    resolvers = {source: ClubResolver(db, source) for source in args.sources}
+    for spec in args.alias or []:
+        name, _, target = (part.strip() for part in spec.partition("="))
+        team = db.team_id_by_name(target)
+        if not name or team is None:
+            db.close()
+            raise SystemExit(f"--alias {spec!r}: expected NAME=CLUB with a club the warehouse knows ({target!r} is not)")
+        for resolver in resolvers.values():
+            resolver.add_alias("", name, team, target)
+    frames, lines = [], []
+    if odds_client is not None:
+        client = odds_client
+        bookmakers = tuple(b.strip() for b in args.bookmakers.split(",") if b.strip())
+        covered = [d for d in divisions if d in SPORT_KEYS]
+        skipped = [d for d in divisions if d not in SPORT_KEYS]
+        fixtures = 0
+        for division in covered:
+            try:
+                rows = parse_events(fetch_odds(client, division, bookmakers), division, now)
+            except OddsApiError as exc:
+                db.close()
+                raise SystemExit(str(exc)) from None
+            fixtures += rows["event_id"].nunique()
+            frames.append(rows)
+        quota = client.quota
+        credits = (f"; credits used {quota['used']}, remaining {quota['remaining']}"
+                   if quota["remaining"] is not None else "")
+        lines.append(f"The Odds API: {fixtures} fixtures in {len(covered)} leagues from {len(bookmakers)} bookmakers"
+                     + (f" ({' '.join(skipped)} not covered)" if skipped else "") + credits)
+    if "football_data" in args.sources:
+        client, _ = make_client(args)
+        rows = parse_fixtures_snapshot(fetch_fixtures_csv(client), tuple(divisions), now)
+        frames.append(rows)
+        books = ", ".join(sorted(rows["bookmaker"].unique())) if len(rows) else "none"
+        lines.append(f"Football-Data fixtures.csv: {rows['event_id'].nunique()} fixtures; bookmakers {books}")
+    result = log_prices(db, frames, resolvers, rule=rule)
+    ledger = db.load_paper_bets(rule.name)
+    db.close()
+    print(f"Prices logged at {now:%Y-%m-%d %H:%M} UTC:")
+    for line in lines:
+        print(f"  {line}")
+    snapshot = result.snapshot
+    if snapshot.empty:
+        print("  Nothing to log: no fixture listed.")
+        return
+    fixtures = snapshot.drop_duplicates(["source", "event_id"])
+    print(f"  {len(snapshot)} prices stored; {fixtures['match_id'].nunique()} fixtures resolved to the warehouse, "
+          f"{int(fixtures['match_id'].isna().sum())} listed fixture(s) not")
+    if result.matched:
+        print("  Spellings matched: " + "; ".join(f"{n} = {c} ({s:.2f})" for _, n, c, s in result.matched))
+    if result.unresolved:
+        print("  Unresolved club names (their fixtures are logged but cannot be settled, so they are not bet):")
+        for (division, name), nearest in sorted(result.unresolved.items()):
+            hint = ", ".join(f"{c} {s:.2f}" for c, s in nearest) or "no candidate"
+            print(f"    {division} {name!r}: nearest {hint}")
+        print('    Teach one with --alias "<name as the source spells it>=<club as the warehouse names it>"')
+    print(f"Rule {rule.name}: {rule.describe()}")
+    if result.bets.empty:
+        print("  No price qualifies in this snapshot.")
+    else:
+        print(f"  {len(result.bets)} fixtures qualify; {result.new_bets} new in the ledger, {len(ledger)} bets recorded in all")
+        print(_indent(_price_table(result.bets, now)))
+
+
+def cmd_board(args: argparse.Namespace) -> None:
+    """The value board from the latest logged prices."""
+    db = Database(args.db)
+    now = _now(args)
+    rule = _rule(args)
+    table = board(db, rule, now=now, days=args.days, every_price=args.every_price)
+    db.close()
+    if table.empty:
+        raise SystemExit(f"No logged prices for fixtures in the next {args.days} days; run `football-predictor log-prices`")
+    what = "every soft price" if args.every_price else "the prices the rule would bet"
+    print(f"Value board at {now:%Y-%m-%d %H:%M} UTC, fixtures in the next {args.days} days, {what}.")
+    print(f"Rule {rule.name}: {rule.describe()}")
+    print(_price_table(table))
+
+
+def cmd_forward_test(args: argparse.Namespace) -> None:
+    """Settle the ledger and report it like a backtest."""
+    db = Database(args.db)
+    result = forward_test(db, args.rule, n_resamples=args.resamples)
+    db.close()
+    m = result.metrics
+    if not m["recorded"]:
+        raise SystemExit(f"No bets in the ledger of rule {args.rule!r}; run `football-predictor log-prices` first")
+    bets = result.bets
+    fair_book = bets["fair_book"].iloc[0]
+    print(f"Forward test of rule {args.rule}: {m['recorded']} bets recorded from {bets['placed_at'].min():%Y-%m-%d} "
+          f"to {bets['placed_at'].max():%Y-%m-%d} on {bets['division'].nunique()} league(s); {m['settled']} settled, "
+          f"{m['pending']} pending. Flat stakes, settled at the price taken.")
+    if bets["closing_at"].notna().any():
+        print(f"  Closing-line value: {fair_book}'s last price logged before kickoff, on average "
+              f"{m['mean_closing_lead_hours']:.1f} h before it; {m['share_with_closing_move']:.0%} of the bets have a "
+              f"later {fair_book} price than the one they were judged by (CLV over every bet {m['mean_clv_all']:+.1%}).")
+    if m["settled"]:
+        print("  Overall (settled bets)")
+        print(_indent(_shop_table(pd.DataFrame([m]))))
+        for title, table, key in (("Per division", result.by_division, "division"),
+                                  ("Per bookmaker", result.by_bookmaker, "bookmaker"),
+                                  ("Per selection", result.by_selection, "selection"),
+                                  ("Per price source", result.by_source, "source")):
+            if not table.empty and len(table) > 1:
+                print(f"  {title}")
+                print(_indent(_shop_table(table, key)))
+    if m["pending"]:
+        print(f"  Pending ({m['pending']}; load results with `football-predictor ingest` / `make data-leagues`)")
+        print(_indent(_price_table(result.pending.head(args.show_pending))))
+        if m["pending"] > args.show_pending:
+            print(f"    ... and {m['pending'] - args.show_pending} more")
+    reports = Path(args.reports_dir)
+    reports.mkdir(parents=True, exist_ok=True)
+    path = reports / f"forward_test_{args.rule}.csv"
+    bets.to_csv(path, index=False)
+    print(f"Ledger: {path}")
+
+
 METRIC_SECTIONS = {
     "Forecast quality": ["matches", "brier_model", "rps_model", "log_loss_model", "score_log_loss_model",
                          "score_hit_model", "accuracy_model", "ece_model", "brier_base_rate",
@@ -831,6 +1008,44 @@ def build_parser() -> argparse.ArgumentParser:
     shop.add_argument("--resamples", type=int, default=2000, help="bootstrap resamples for the intervals")
     shop.set_defaults(func=cmd_shop)
 
+    def rule_options(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--rule", default="favourites", help="name of the ledger the bets go to (default: %(default)s)")
+        p.add_argument("--fair-book", default="pinnacle", help="whose de-margined price is the fair value")
+        p.add_argument("--books", default="soft",
+                       help="soft (every bookmaker but the sharp ones, the exchanges and the market aggregates) or a "
+                            "comma-separated list of bookmaker names as the warehouse stores them (default: soft)")
+        p.add_argument("--max-odds", type=float, default=3.0, help="bet favourites only, up to this price")
+        p.add_argument("--ev-threshold", type=float, default=0.0)
+        p.add_argument("--now", default=None, help=argparse.SUPPRESS)  # a fixed clock, for tests
+
+    live = sub.add_parser("log-prices", help="log the coming fixtures' prices before kickoff and record the rule's bets")
+    live.add_argument("--sources", nargs="+", choices=["odds_api", "football_data"], default=["odds_api", "football_data"],
+                      help="The Odds API (Pinnacle and the soft books it lists; needs ODDS_API_KEY) and/or "
+                           "Football-Data's fixtures.csv (its soft books; free)")
+    live.add_argument("--divisions", nargs="+", default=["all"],
+                      help="leagues to log, or all (default: every league The Odds API covers)")
+    live.add_argument("--bookmakers", default=",".join(DEFAULT_BOOKMAKERS),
+                      help="The Odds API bookmaker keys to ask for; every ten cost one credit per league "
+                           "(default: Pinnacle and nine soft books)")
+    live.add_argument("--alias", action="append", metavar="NAME=CLUB",
+                      help='teach a source\'s spelling of a club, e.g. "Stade Rennais=Rennes" (repeatable)')
+    rule_options(live)
+    network_options(live)
+    live.set_defaults(func=cmd_log_prices, no_browser_fallback=True)
+
+    board_parser = sub.add_parser("board", help="the live value board from the logged prices")
+    board_parser.add_argument("--days", type=int, default=7, help="fixtures in the next DAYS days")
+    board_parser.add_argument("--every-price", action="store_true",
+                              help="list every soft price against the fair value, not only those the rule would bet")
+    rule_options(board_parser)
+    board_parser.set_defaults(func=cmd_board)
+
+    forward = sub.add_parser("forward-test", help="settle the ledger of paper bets against results and closing prices")
+    forward.add_argument("--rule", default="favourites")
+    forward.add_argument("--resamples", type=int, default=2000, help="bootstrap resamples for the intervals")
+    forward.add_argument("--show-pending", type=int, default=15, metavar="N", help="pending bets to list")
+    forward.set_defaults(func=cmd_forward_test)
+
     for name, help_text in (("backtest", "walk-forward backtest with EV betting"),
                             ("demo", "backtest on a simulated league (no network needed)")):
         bt = sub.add_parser(name, help=help_text)
@@ -872,7 +1087,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-NETWORK_COMMANDS = {"ingest", "check-sources"}
+NETWORK_COMMANDS = {"ingest", "check-sources", "log-prices"}
 
 
 def _utf8_console() -> None:

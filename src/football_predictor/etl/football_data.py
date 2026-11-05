@@ -274,3 +274,37 @@ def parse_fixtures(csv_text: str, divisions=("E0", "E1")) -> tuple[pd.DataFrame,
     )
     odds = _odds_long(raw, matches)
     return matches, odds[odds["market_time"] == "opening"].reset_index(drop=True)
+
+
+def parse_fixtures_snapshot(csv_text: str, divisions, snapshot_at) -> pd.DataFrame:
+    """The current 1X2 prices in ``fixtures.csv`` as a price snapshot (see :mod:`.odds_api`).
+
+    Football-Data publishes the week's fixtures with the named bookmakers'
+    prices and the market average a few days before kickoff; logged with the
+    time of collection they stand in for a live feed of the soft bookmakers
+    it follows and the API does not (Bet365, bwin). Kickoffs are UK local time
+    in the file and UTC here; the market maximum is left out, since no one
+    account can take it.
+    """
+    matches, odds = parse_fixtures(csv_text, divisions)
+    if matches.empty:
+        return pd.DataFrame(columns=["snapshot_at", "source", "division", "event_id", "kickoff_utc", "home_name",
+                                     "away_name", "bookmaker", "home", "draw", "away"])
+    kickoff = matches["kickoff"].dt.tz_localize("Europe/London", ambiguous="NaT", nonexistent="shift_forward")
+    matches = matches.assign(
+        kickoff_utc=kickoff.dt.tz_convert("UTC").dt.tz_localize(None),
+        event_id=[f"{d}:{k:%Y-%m-%dT%H:%M}:{h}:{a}" for d, k, h, a in
+                  zip(matches["division"], matches["kickoff"], matches["home_team"], matches["away_team"])],
+    )
+    keys = ["season", "home_team", "away_team"]
+    long = odds[odds["bookmaker"] != "max"].merge(
+        matches[keys + ["division", "kickoff_utc", "event_id"]].drop_duplicates(keys), on=keys, how="inner"
+    )
+    stamp = pd.Timestamp(snapshot_at)
+    stamp = stamp.tz_convert("UTC").tz_localize(None) if stamp.tzinfo is not None else stamp
+    return pd.DataFrame({
+        "snapshot_at": stamp.floor("s"), "source": "football_data", "division": long["division"],
+        "event_id": long["event_id"], "kickoff_utc": long["kickoff_utc"], "home_name": long["home_team"],
+        "away_name": long["away_team"], "bookmaker": long["bookmaker"],
+        "home": long["home"], "draw": long["draw"], "away": long["away"],
+    }).reset_index(drop=True)
