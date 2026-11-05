@@ -588,7 +588,8 @@ logged before kickoff, with a ledger of what it picked.
   second bet on the fixture. Only fixtures within 72 hours of kickoff are bet
   (`--horizon-hours`): the API lists rounds weeks ahead, and the study found
   early prices lose their edge by closing. The key is read from the `ODDS_API_KEY`
-  environment variable and written nowhere. Every ten bookmakers cost one
+  environment variable or from `data/odds_api.key` (git ignores the data
+  directory) and written nowhere else. Every ten bookmakers cost one
   credit per league, so a run over the eighteen leagues costs eighteen of the
   free plan's 500 a month: a run before each round, all season, fits.
 * **Clubs across sources.** The API spells clubs its own way ("Borussia

@@ -520,11 +520,15 @@ def cmd_shop(args: argparse.Namespace) -> None:
 
 
 def make_odds_client(args: argparse.Namespace) -> OddsApiClient:
+    """The Odds API key: the ODDS_API_KEY environment variable, else ``<data-dir>/odds_api.key`` (git ignores the data directory)."""
     key = os.environ.get("ODDS_API_KEY", "")
+    key_file = Path(args.data_dir) / "odds_api.key"
+    if not key and key_file.exists():
+        key = key_file.read_text(encoding="utf-8").strip()
     if not key:
-        raise SystemExit("log-prices reads The Odds API key from the ODDS_API_KEY environment variable (a free key, "
-                         "500 credits a month, at the-odds-api.com); pass --sources football_data to log "
-                         "Football-Data's prices alone")
+        raise SystemExit(f"log-prices reads The Odds API key from the ODDS_API_KEY environment variable or from "
+                         f"{key_file} (a free key, 500 credits a month, at the-odds-api.com); pass --sources "
+                         "football_data to log Football-Data's prices alone")
     return OddsApiClient(key)
 
 

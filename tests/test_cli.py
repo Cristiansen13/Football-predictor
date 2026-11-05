@@ -1,3 +1,4 @@
+import argparse
 import json
 
 import numpy as np
@@ -203,6 +204,10 @@ def test_log_prices_needs_a_key_for_the_odds_api(tmp_path, capsys, offline, monk
     monkeypatch.delenv("ODDS_API_KEY", raising=False)
     with pytest.raises(SystemExit, match="ODDS_API_KEY"):
         main(["--data-dir", str(tmp_path), "log-prices"])
+    # The key may sit in the data directory instead, which git ignores.
+    (tmp_path / "odds_api.key").write_text("test-key\n", encoding="utf-8")
+    assert cli.make_odds_client(argparse.Namespace(data_dir=tmp_path))._api_key == "test-key"
+    (tmp_path / "odds_api.key").unlink()
     main(["--data-dir", str(tmp_path), "ingest", "--seasons", "2023", "--sources", "football_data"])
     capsys.readouterr()
     main(["--data-dir", str(tmp_path), "log-prices", "--sources", "football_data", "--divisions", "E0",
