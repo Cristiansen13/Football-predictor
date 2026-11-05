@@ -54,7 +54,7 @@ from .evaluation.backtest import BacktestResult, evaluate_forecasts
 from .evaluation.forward import forward_test
 from .evaluation.shopping import EXCHANGE, net_exchange
 from .features import audit_point_in_time, build_features, lineup_strength, player_form_strength
-from .live import ClubResolver, Rule, board, log_prices
+from .live import ClubResolver, Rule, board, due_divisions, log_prices
 from .models import FEATURE_PRESETS, DixonColesModel
 from .quality import coverage_report, validate
 from .synthetic import simulate_league
@@ -571,7 +571,8 @@ def cmd_log_prices(args: argparse.Namespace) -> None:
     odds_client = make_odds_client(args) if "odds_api" in args.sources else None
     db = Database(args.db)
     now = _now(args)
-    divisions = list(SPORT_KEYS) if "all" in args.divisions else list(args.divisions)
+    due = "due" in args.divisions
+    divisions = list(SPORT_KEYS) if due or "all" in args.divisions else list(args.divisions)
     rule = _rule(args)
     resolvers = {source: ClubResolver(db, source) for source in args.sources}
     for spec in args.alias or []:
@@ -583,11 +584,20 @@ def cmd_log_prices(args: argparse.Namespace) -> None:
         for resolver in resolvers.values():
             resolver.add_alias("", name, team, target)
     frames, lines = [], []
+    if "football_data" in args.sources:
+        # Free, and fetched first: on a `due` run its kickoffs tell which leagues to ask the API for.
+        client, _ = make_client(args)
+        rows = parse_fixtures_snapshot(fetch_fixtures_csv(client), tuple(divisions), now)
+        frames.append(rows)
+        books = ", ".join(sorted(rows["bookmaker"].unique())) if len(rows) else "none"
+        lines.append(f"Football-Data fixtures.csv: {rows['event_id'].nunique()} fixtures; bookmakers {books}")
     if odds_client is not None:
         client = odds_client
         bookmakers = tuple(b.strip() for b in args.bookmakers.split(",") if b.strip())
         covered = [d for d in divisions if d in SPORT_KEYS]
         skipped = [d for d in divisions if d not in SPORT_KEYS]
+        if due:
+            covered = [d for d in due_divisions(db, now=now, hours=args.due_hours, frames=frames) if d in SPORT_KEYS]
         fixtures = 0
         for division in covered:
             try:
@@ -600,14 +610,15 @@ def cmd_log_prices(args: argparse.Namespace) -> None:
         quota = client.quota
         credits = (f"; credits used {quota['used']}, remaining {quota['remaining']}"
                    if quota["remaining"] is not None else "")
-        lines.append(f"The Odds API: {fixtures} fixtures in {len(covered)} leagues from {len(bookmakers)} bookmakers"
-                     + (f" ({' '.join(skipped)} not covered)" if skipped else "") + credits)
-    if "football_data" in args.sources:
-        client, _ = make_client(args)
-        rows = parse_fixtures_snapshot(fetch_fixtures_csv(client), tuple(divisions), now)
-        frames.append(rows)
-        books = ", ".join(sorted(rows["bookmaker"].unique())) if len(rows) else "none"
-        lines.append(f"Football-Data fixtures.csv: {rows['event_id'].nunique()} fixtures; bookmakers {books}")
+        if due and not covered:
+            lines.insert(0, f"The Odds API: no league has a fixture due within {args.due_hours:g} h, nothing asked"
+                            f"{credits}")
+        elif due:
+            lines.insert(0, f"The Odds API: {fixtures} fixtures in {len(covered)} league(s) due within "
+                            f"{args.due_hours:g} h ({' '.join(covered)}) from {len(bookmakers)} bookmakers{credits}")
+        else:
+            lines.insert(0, f"The Odds API: {fixtures} fixtures in {len(covered)} leagues from {len(bookmakers)} "
+                            f"bookmakers" + (f" ({' '.join(skipped)} not covered)" if skipped else "") + credits)
     result = log_prices(db, frames, resolvers, rule=rule)
     ledger = db.load_paper_bets(rule.name)
     db.close()
@@ -669,6 +680,13 @@ def cmd_forward_test(args: argparse.Namespace) -> None:
         print(f"  Closing-line value: {fair_book}'s last price logged before kickoff, on average "
               f"{m['mean_closing_lead_hours']:.1f} h before it; {m['share_with_closing_move']:.0%} of the bets have a "
               f"later {fair_book} price than the one they were judged by (CLV over every bet {m['mean_clv_all']:+.1%}).")
+    if m["price_checked"]:
+        print(f"  Price availability: {m['price_checked']} bet(s) have a later price from their bookmaker logged "
+              f"before kickoff; the price taken, or a better one, was still there in {m['share_price_held']:.0%} of "
+              f"them, and the bookmaker's last price sat {m['mean_price_drift']:+.1%} from the one taken on average.")
+    else:
+        print("  Price availability: no bet has a later price from its bookmaker logged before kickoff yet; run "
+              "`log-prices --divisions due` close to kickoff to see whether the prices taken hold.")
     if m["settled"]:
         print("  Overall (settled bets)")
         print(_indent(_shop_table(pd.DataFrame([m]))))
@@ -1030,7 +1048,12 @@ def build_parser() -> argparse.ArgumentParser:
                       help="The Odds API (Pinnacle and the soft books it lists; needs ODDS_API_KEY) and/or "
                            "Football-Data's fixtures.csv (its soft books; free)")
     live.add_argument("--divisions", nargs="+", default=["all"],
-                      help="leagues to log, or all (default: every league The Odds API covers)")
+                      help="leagues to log, all (default: every league The Odds API covers), or due: only the "
+                           "leagues with a fixture kicking off within --due-hours, known from the prices logged "
+                           "so far and from Football-Data's free fixtures file, so a run near kickoff costs a "
+                           "credit per league playing rather than per league")
+    live.add_argument("--due-hours", type=float, default=12.0,
+                      help="with --divisions due, how far ahead a kickoff counts as due (default: %(default)s)")
     live.add_argument("--bookmakers", default=",".join(DEFAULT_BOOKMAKERS),
                       help="The Odds API bookmaker keys to ask for; every ten cost one credit per league "
                            "(default: Pinnacle and nine soft books)")

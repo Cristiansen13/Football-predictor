@@ -62,6 +62,10 @@ data-leagues:       ## results and every bookmaker's prices for the other league
 log-prices:         ## log the coming fixtures' prices before kickoff (The Odds API key in ODDS_API_KEY or data/odds_api.key; one credit per league) and record the rule's bets
 	$(CLI) log-prices
 
+DUE_HOURS ?= 12
+log-prices-due:     ## the same near kickoff: only the leagues with a fixture due within DUE_HOURS hours, a credit per league playing
+	$(CLI) log-prices --divisions due --due-hours $(DUE_HOURS)
+
 board:              ## the live value board from the logged prices: soft favourites against Pinnacle
 	$(CLI) board
 

@@ -231,6 +231,26 @@ def select_bets(snapshot: pd.DataFrame, rule: Rule = FAVOURITES) -> pd.DataFrame
             .sort_values(["kickoff_utc", "home_name"]).reset_index(drop=True))
 
 
+def due_divisions(db: Database, *, now, hours: float, frames: list[pd.DataFrame] | None = None) -> list[str]:
+    """Leagues with a fixture kicking off within ``hours`` of ``now``, from the prices logged so far and ``frames``.
+
+    The Odds API charges a credit per league asked, whether or not a match is
+    near, so a run close to kickoff asks only for the leagues due. A league is
+    known to be due from an earlier snapshot of the fixture (any source) or
+    from a frame fetched this run before the API is asked, such as
+    Football-Data's free fixtures file.
+    """
+    start = pd.Timestamp(now)
+    end = start + pd.Timedelta(hours=hours)
+    due = set(db.divisions_with_kickoffs(start, end))
+    for frame in frames or []:
+        if frame is None or frame.empty:
+            continue
+        kickoff = pd.to_datetime(frame["kickoff_utc"])
+        due |= set(frame.loc[(kickoff >= start) & (kickoff < end), "division"].unique())
+    return sorted(due)
+
+
 @dataclass
 class LogResult:
     snapshot: pd.DataFrame

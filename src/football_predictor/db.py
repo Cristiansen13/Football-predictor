@@ -551,6 +551,14 @@ class Database:
             frame[column] = pd.to_datetime(frame[column])
         return frame
 
+    def divisions_with_kickoffs(self, start, end) -> list[str]:
+        """Divisions with a logged fixture kicking off in ``[start, end)``, sorted."""
+        frame = self.query(
+            "SELECT DISTINCT division FROM price_snapshots WHERE kickoff_utc >= ? AND kickoff_utc < ? ORDER BY division",
+            [_iso(start), _iso(end)],
+        )
+        return frame["division"].tolist()
+
     def insert_paper_bets(self, frame: pd.DataFrame) -> int:
         """Record bets; a fixture already in the ledger for the rule keeps its first bet. Returns the number added."""
         if frame.empty:

@@ -12,7 +12,8 @@ from football_predictor.etl.pipeline import Pipeline
 from football_predictor.evaluation.backtest import MARKET_DEMARGIN
 from football_predictor.evaluation.forward import forward_test
 from football_predictor.evaluation.metrics import implied_probabilities
-from football_predictor.live import FAVOURITES, ClubResolver, Rule, board, log_prices, select_bets, value_board
+from football_predictor.live import (FAVOURITES, ClubResolver, Rule, board, due_divisions, log_prices, select_bets,
+                                     value_board)
 
 from . import fake_sources as fake
 
@@ -163,6 +164,20 @@ def test_log_prices_resolves_clubs_across_sources_and_records_the_rule_bets(ware
     assert board(db, now=pd.Timestamp("2023-09-17"), days=7).empty  # nothing left to come
 
 
+def test_due_divisions_come_from_logged_kickoffs_and_from_frames_fetched_this_run(warehouse):
+    db = warehouse
+    assert due_divisions(db, now=T1, hours=12) == []  # nothing logged yet
+    # Football-Data's free file, fetched before the API is asked, names the leagues due on its own.
+    frames = [parse_fixtures_snapshot(fake.fixtures_csv(), ("E0", "SC0"), T1)]
+    assert due_divisions(db, now=T1, hours=12, frames=frames) == []  # the round is two days out
+    assert due_divisions(db, now=T1, hours=60, frames=frames) == ["E0", "SC0"]
+    resolvers = {s: ClubResolver(db, s) for s in ("odds_api", "football_data")}
+    log_prices(db, _snapshot_frames(T1), resolvers)
+    assert due_divisions(db, now=T2, hours=2) == ["E0", "SC0"]  # the 14:00 kickoffs in both leagues
+    assert due_divisions(db, now=T2 + pd.Timedelta(hours=1.5), hours=2) == ["E0"]  # only Forest v City (16:00) is left
+    assert due_divisions(db, now=pd.Timestamp("2023-09-17"), hours=48) == []
+
+
 def test_log_prices_keeps_unresolved_fixtures_out_of_the_ledger_until_taught(warehouse):
     db = warehouse
     events = fake.odds_api_events("SC0")
@@ -218,8 +233,15 @@ def test_forward_test_settles_the_ledger_and_values_it_at_the_last_sharp_price(w
     # Without a later Pinnacle price the closing value is the price the bet was judged by.
     assert before.bets["clv"].to_numpy() == pytest.approx(before.bets["ev"].to_numpy())
     assert before.metrics["share_with_closing_move"] == 0.0
+    # Nor can anything say yet whether the prices held: each bet only reads its own snapshot back.
+    assert before.metrics["price_checked"] == 0 and np.isnan(before.metrics["share_price_held"])
+    assert before.bets["price_held"].isna().all() and (before.bets["last_odds_at"] == T1).all()
+    assert (before.bets["last_odds"] == before.bets["odds"]).all()
 
-    log_prices(db, _snapshot_frames(T2, closing=True), resolvers)
+    frames = _snapshot_frames(T2, closing=True)
+    wolves_wh = (frames[0]["bookmaker"] == "william_hill") & (frames[0]["home_name"] == "Wolverhampton Wanderers")
+    frames[0].loc[wolves_wh, "away"] = 2.30  # William Hill has cut the price the ledger took (2.50)
+    log_prices(db, frames, resolvers)
     _settle(db, [("Wolverhampton Wanderers", "Manchester United", 0, 2),  # away won: the bet pays 1.50
                  ("Nottingham Forest", "Manchester City", 1, 1),  # draw: the away bet loses
                  ("Dundee", "Rangers", 2, 0)])  # home won: pays 0.95
@@ -239,6 +261,13 @@ def test_forward_test_settles_the_ledger_and_values_it_at_the_last_sharp_price(w
     assert (settled["clv"] > settled["ev"]).all() and m["mean_clv"] > m["mean_ev"]
     assert settled.loc["Dundee", "clv"] == pytest.approx(_expected_ev((1.78, 3.90, 4.40), "home", 1.95))
     assert m["share_with_closing_move"] == 1.0 and m["mean_closing_lead_hours"] == pytest.approx(5 / 3)
+    # Availability: every bet's bookmaker was logged again an hour before kickoff; one price had gone.
+    assert (settled["last_odds_at"] == T2).all()
+    assert settled["last_odds"].to_dict() == pytest.approx(
+        {"Wolverhampton Wanderers": 2.30, "Nottingham Forest": 1.40, "Dundee": 1.95})
+    assert settled["price_held"].to_dict() == {"Wolverhampton Wanderers": False, "Nottingham Forest": True, "Dundee": True}
+    assert m["price_checked"] == 3 and m["share_price_held"] == pytest.approx(2 / 3)
+    assert m["mean_price_drift"] == pytest.approx((2.30 / 2.50 - 1.0) / 3)
     assert set(result.by_division["division"]) == {"E0", "SC0"} and set(result.by_bookmaker["bookmaker"]) == {
         "william_hill", "betvictor"}
     assert result.by_selection.set_index("selection").loc["away", "bets"] == 2

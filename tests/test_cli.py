@@ -181,6 +181,17 @@ def test_log_prices_board_and_forward_test(tmp_path, capsys, offline, monkeypatc
     assert "Wolverhampton Wanderers v Manchester United" in out and "william_hill" in out and "betvictor" in out
     assert out.count(" new") >= 3
 
+    # Near kickoff, `due` asks the API only for the leagues with a fixture coming: one credit, not two.
+    main(["--data-dir", str(tmp_path), "log-prices", "--divisions", "due", "--due-hours", "2",
+          "--now", "2023-09-16T14:30"])
+    out = capsys.readouterr().out
+    assert ("The Odds API: 2 fixtures in 1 league(s) due within 2 h (E0) from 10 bookmakers; credits used 3, "
+            "remaining 497") in out
+    assert "0 new in the ledger, 3 bets recorded in all" in out
+    main(["--data-dir", str(tmp_path), "log-prices", "--sources", "odds_api", "--divisions", "due", "--now", "2023-10-01"])
+    out = capsys.readouterr().out
+    assert "The Odds API: no league has a fixture due within 12 h, nothing asked" in out and "Nothing to log" in out
+
     main(["--data-dir", str(tmp_path), "board", "--now", "2023-09-14T12:00", "--days", "3"])
     out = capsys.readouterr().out
     assert "Value board at 2023-09-14 12:00 UTC, fixtures in the next 3 days" in out
@@ -193,6 +204,9 @@ def test_log_prices_board_and_forward_test(tmp_path, capsys, offline, monkeypatc
     main(["--data-dir", str(tmp_path), "forward-test", "--resamples", "10"])
     out = capsys.readouterr().out
     assert "Forward test of rule favourites: 3 bets recorded from 2023-09-14 to 2023-09-14 on 2 league(s); 0 settled, 3 pending" in out
+    # The due run logged BetVictor's price on Forest v City again before kickoff (the other two had kicked off).
+    assert ("Price availability: 1 bet(s) have a later price from their bookmaker logged before kickoff; the price "
+            "taken, or a better one, was still there in 100% of them") in out
     assert "Pending (3" in out and "Dundee v Rangers" in out
     ledger = pd.read_csv(tmp_path / "reports" / "forward_test_favourites.csv")
     assert len(ledger) == 3 and (ledger["status"] == "pending").all()
