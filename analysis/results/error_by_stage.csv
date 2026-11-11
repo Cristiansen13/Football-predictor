@@ -1,0 +1,4 @@
+stage,matches,accuracy_logistic,brier_logistic,accuracy_poisson,brier_poisson,accuracy_bookmaker,brier_bookmaker
+Rounds 1 to 5,150,0.5733,0.5531,0.5667,0.5562,0.5800,0.5341
+Rounds 6 to 19,420,0.5333,0.5935,0.5071,0.6075,0.5333,0.5847
+Rounds 20 to 38,570,0.5351,0.5855,0.5175,0.5908,0.5544,0.5686

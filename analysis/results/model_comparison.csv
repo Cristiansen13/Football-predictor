@@ -1,0 +1,8 @@
+model,name,matches,accuracy,brier,log_loss,brier_minus_bookmaker,ci_low,ci_high
+baseline,Class frequencies,1140,0.43158,0.64955,1.07297,0.07955,0.06332,0.09514
+elo,Elo + logistic regression,1140,0.53421,0.58494,0.98053,0.01494,0.00839,0.02172
+poisson,Poisson (team averages),1140,0.52018,0.59238,0.99350,0.02238,0.01339,0.03120
+logistic,Logistic regression,1140,0.53947,0.58420,0.98029,0.01420,0.00750,0.02062
+forest,Random forest,1140,0.53596,0.58678,0.98565,0.01678,0.00997,0.02343
+boosting,Gradient boosting,1140,0.52456,0.58878,0.98957,0.01878,0.01127,0.02621
+bookmaker,Bookmaker (Bet365 closing odds),1140,0.55000,0.57000,0.96019,0.00000,0.00000,0.00000

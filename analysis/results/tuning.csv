@@ -1,0 +1,17 @@
+model,setting,validation_log_loss,chosen
+baseline,-,1.060224528473229,True
+elo,-,0.9677209151299292,True
+logistic,{'C': 0.003},0.9700308115328704,True
+logistic,{'C': 0.01},0.9711240932130493,False
+logistic,{'C': 0.03},0.973201785878347,False
+logistic,{'C': 0.1},0.9747618151642939,False
+logistic,{'C': 1.0},0.9756286243729766,False
+forest,{'min_samples_leaf': 10},0.9784276316342277,False
+forest,{'min_samples_leaf': 30},0.9754292789448312,False
+forest,{'min_samples_leaf': 60},0.9745309406736423,True
+boosting,"{'learning_rate': 0.03, 'max_iter': 100, 'max_depth': 2}",0.9802434006658515,True
+boosting,"{'learning_rate': 0.03, 'max_iter': 100, 'max_depth': 3}",0.9888589106880272,False
+boosting,"{'learning_rate': 0.03, 'max_iter': 200, 'max_depth': 2}",0.9896732288886548,False
+boosting,"{'learning_rate': 0.03, 'max_iter': 200, 'max_depth': 3}",1.0075529966099246,False
+boosting,"{'learning_rate': 0.05, 'max_iter': 100, 'max_depth': 2}",0.9872098050062723,False
+boosting,"{'learning_rate': 0.05, 'max_iter': 100, 'max_depth': 3}",0.9991734753511511,False

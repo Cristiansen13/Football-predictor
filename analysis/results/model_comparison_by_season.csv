@@ -1,0 +1,22 @@
+model,name,season,accuracy,brier,log_loss
+baseline,Class frequencies,2023,0.46053,0.63710,1.05404
+baseline,Class frequencies,2024,0.40789,0.65573,1.08109
+baseline,Class frequencies,2025,0.42632,0.65582,1.08378
+elo,Elo + logistic regression,2023,0.58158,0.54499,0.92548
+elo,Elo + logistic regression,2024,0.53684,0.58993,0.98664
+elo,Elo + logistic regression,2025,0.48421,0.61990,1.02948
+poisson,Poisson (team averages),2023,0.57105,0.56023,0.94782
+poisson,Poisson (team averages),2024,0.51053,0.59711,1.00068
+poisson,Poisson (team averages),2025,0.47895,0.61980,1.03199
+logistic,Logistic regression,2023,0.59737,0.54437,0.92538
+logistic,Logistic regression,2024,0.53947,0.58852,0.98567
+logistic,Logistic regression,2025,0.48158,0.61971,1.02981
+forest,Random forest,2023,0.58947,0.54928,0.93370
+forest,Random forest,2024,0.53421,0.59056,0.99144
+forest,Random forest,2025,0.48421,0.62050,1.03182
+boosting,Gradient boosting,2023,0.57368,0.54765,0.93389
+boosting,Gradient boosting,2024,0.52895,0.59471,0.99893
+boosting,Gradient boosting,2025,0.47105,0.62397,1.03590
+bookmaker,Bookmaker (Bet365 closing odds),2023,0.59737,0.52598,0.89968
+bookmaker,Bookmaker (Bet365 closing odds),2024,0.55526,0.57577,0.96777
+bookmaker,Bookmaker (Bet365 closing odds),2025,0.49737,0.60824,1.01313

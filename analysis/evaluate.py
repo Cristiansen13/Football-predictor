@@ -1,6 +1,6 @@
-"""Honest evaluation: refit before every match day, then score the forecasts.
+"""Scoring rules and the walk-forward evaluation of the Poisson model.
 
-Walk-forward means the model only ever sees matches played before the day it
+Walk-forward means a model only ever sees matches played before the day it
 predicts, exactly as it would in real use. Scores:
 
 * accuracy      how often the most likely result (home/draw/away) happened
@@ -9,7 +9,7 @@ predicts, exactly as it would in real use. Scores:
 * score hit     how often the most likely exact score happened
 
 The same numbers are computed for the bookmaker (Bet365) from its odds, so the
-model can be judged against a strong reference, and a simple flat-stake
+models can be judged against a strong reference, and a simple flat-stake
 "value bet" rule shows whether beating the odds is realistic.
 """
 
@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .model import PoissonModel
+from .poisson import PoissonModel
 
 OUTCOMES = ["p_home", "p_draw", "p_away"]
 
@@ -42,6 +42,31 @@ def brier(probabilities: np.ndarray, outcomes: np.ndarray) -> float:
 def log_loss(probabilities: np.ndarray, outcomes: np.ndarray) -> float:
     picked = probabilities[np.arange(len(outcomes)), outcomes]
     return float(-np.log(np.clip(picked, 1e-12, None)).mean())
+
+
+def score(probabilities: np.ndarray, outcomes: np.ndarray) -> dict:
+    """Accuracy, Brier score and log loss of a set of forecasts."""
+    probabilities, outcomes = np.asarray(probabilities, dtype=float), np.asarray(outcomes, dtype=int)
+    return {
+        "accuracy": float((probabilities.argmax(axis=1) == outcomes).mean()),
+        "brier": brier(probabilities, outcomes),
+        "log_loss": log_loss(probabilities, outcomes),
+    }
+
+
+def brier_per_match(probabilities: np.ndarray, outcomes: np.ndarray) -> np.ndarray:
+    """Each match's contribution to the Brier score."""
+    one_hot = np.eye(3)[np.asarray(outcomes, dtype=int)]
+    return ((np.asarray(probabilities, dtype=float) - one_hot) ** 2).sum(axis=1)
+
+
+def paired_bootstrap(a: np.ndarray, b: np.ndarray, *, n_resamples: int = 2000, seed: int = 0) -> tuple[float, float, float]:
+    """Mean of ``a - b`` over the same matches with a 95% bootstrap interval (matches resampled together)."""
+    difference = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
+    rng = np.random.default_rng(seed)
+    rows = rng.integers(0, len(difference), size=(n_resamples, len(difference)))
+    means = difference[rows].mean(axis=1)
+    return float(difference.mean()), float(np.quantile(means, 0.025)), float(np.quantile(means, 0.975))
 
 
 def backtest(

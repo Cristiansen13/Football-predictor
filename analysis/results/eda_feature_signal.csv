@@ -1,0 +1,11 @@
+feature,label,correlation
+elo,Elo rating,0.4385
+gf38,"Goals scored, last 38",0.4138
+ga38,"Goals conceded, last 38",0.3656
+sot5,"Shots on target, last 5",0.3212
+pts5,"Points per game, last 5",0.2892
+venue_pts5,"Points per game at this venue, last 5",0.2815
+sota5,"Shots on target conceded, last 5",0.2803
+gf5,"Goals scored, last 5",0.2801
+ga5,"Goals conceded, last 5",0.2281
+rest,Rest days,-0.0723
