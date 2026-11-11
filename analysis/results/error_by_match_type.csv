@@ -1,4 +1,4 @@
 match_type,matches,accuracy_logistic,brier_logistic,accuracy_poisson,brier_poisson,accuracy_bookmaker,brier_bookmaker
-Even match (favourite below 45%),347,0.3919,0.6709,0.3602,0.6807,0.4323,0.6519
-Clear favourite (45% to 65%),552,0.5399,0.6082,0.5199,0.6159,0.5362,0.5963
-Strong favourite (above 65%),241,0.7510,0.4045,0.7510,0.4114,0.7510,0.3918
+Even match (favourite below 45%),347,0.39193,0.67091,0.36023,0.68068,0.43228,0.65187
+Clear favourite (45% to 65%),552,0.53986,0.60817,0.51993,0.61588,0.53623,0.59632
+Strong favourite (above 65%),241,0.75104,0.40445,0.75104,0.41142,0.75104,0.39183

@@ -1,4 +1,4 @@
 gap_to_bookmaker,matches,accuracy_logistic,brier_logistic,accuracy_bookmaker,brier_bookmaker
-Within 5 points,557,0.5907,0.5477,0.5871,0.5468
-5 to 10 points apart,401,0.5187,0.5950,0.5337,0.5842
-More than 10 points apart,182,0.4286,0.6720,0.4725,0.6096
+Within 5 points,557,0.59066,0.54772,0.58707,0.54684
+5 to 10 points apart,401,0.51870,0.59503,0.53367,0.58420
+More than 10 points apart,182,0.42857,0.67200,0.47253,0.60959

@@ -17,7 +17,7 @@ odds at kickoff. An error analysis shows where the forecasts fail.
 | [`extraction/`](extraction) | Crawling and preprocessing: `download.py` fetches the season files, `preprocess.py` cleans them into one match table, `features.py` builds the modelling table. |
 | [`analysis/`](analysis) | `eda.py` (exploratory analysis), `poisson.py` and `models.py` (the models), `compare_models.py` (training, walk-forward evaluation, comparison), `error_analysis.py`, `predict.py` (forecast one fixture). Result tables are in `analysis/results/`. |
 | [`data/`](data) | `raw/`: the twelve season files as downloaded. `final/`: `matches.csv` and `features.csv`. Described in [`data/README.md`](data/README.md). |
-| [`docs/`](docs) | The two presentations ([phase 1](docs/phase1_presentation.pptx), [phase 2](docs/phase2_presentation.pptx), each also as PDF) and the figures. |
+| [`docs/`](docs) | The final report ([PDF](docs/final_report.pdf), [Word](docs/final_report.docx)), the two presentations ([phase 1](docs/phase1_presentation.pptx), [phase 2](docs/phase2_presentation.pptx), each also as PDF) and the figures. |
 | [`tests/`](tests) | Offline tests of the cleaning, the features, the models and the scores. |
 
 ## How to run

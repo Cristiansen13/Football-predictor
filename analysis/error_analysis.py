@@ -251,39 +251,39 @@ def main(argv: list[str] | None = None) -> None:
     print(f"{len(predictions)} test matches; best machine-learning model: {MODEL_NAMES[best]}\n")
 
     recall = recall_table(predictions, OUR_MODELS + ["bookmaker"])
-    recall.to_csv(style.RESULTS_DIR / "error_recall.csv", index=False, float_format="%.4f")
+    recall.to_csv(style.RESULTS_DIR / "error_recall.csv", index=False, float_format="%.5f")
     print("Share of matches each result is predicted in, recall per result, highest draw probability ever given:")
     print(recall.round(3).to_string(index=False))
     actual = predictions["outcome"].value_counts(normalize=True).sort_index()
     print(f"Actual shares: home {actual[0]:.3f}, draw {actual[1]:.3f}, away {actual[2]:.3f}")
 
     calibration = calibration_table(predictions, keys)
-    calibration.to_csv(style.RESULTS_DIR / "error_calibration.csv", index=False, float_format="%.4f")
+    calibration.to_csv(style.RESULTS_DIR / "error_calibration.csv", index=False, float_format="%.5f")
     print("\nCalibration (three results pooled):")
     print(calibration.round(3).to_string(index=False))
 
     kinds = by_group(predictions, match_type(predictions), keys, "match_type")
-    kinds.to_csv(style.RESULTS_DIR / "error_by_match_type.csv", index=False, float_format="%.4f")
+    kinds.to_csv(style.RESULTS_DIR / "error_by_match_type.csv", index=False, float_format="%.5f")
     print("\nBy kind of match:")
     print(kinds.round(3).to_string(index=False))
 
     stages = by_group(predictions, season_stage(predictions), keys, "stage")
-    stages.to_csv(style.RESULTS_DIR / "error_by_stage.csv", index=False, float_format="%.4f")
+    stages.to_csv(style.RESULTS_DIR / "error_by_stage.csv", index=False, float_format="%.5f")
     print("\nBy stage of the season:")
     print(stages.round(3).to_string(index=False))
 
     teams = by_team(predictions, best)
-    teams.to_csv(style.RESULTS_DIR / "error_by_team.csv", index=False, float_format="%.4f")
+    teams.to_csv(style.RESULTS_DIR / "error_by_team.csv", index=False, float_format="%.5f")
     print(f"\nClubs the {MODEL_NAMES[best].lower()} under-rated most, then over-rated most (points per game):")
     print(pd.concat([teams.head(4), teams.tail(4)]).round(3).to_string(index=False))
 
     gaps = disagreement(predictions, best)
-    gaps.to_csv(style.RESULTS_DIR / "error_disagreement.csv", index=False, float_format="%.4f")
+    gaps.to_csv(style.RESULTS_DIR / "error_disagreement.csv", index=False, float_format="%.5f")
     print("\nWhen the model and the bookmaker disagree:")
     print(gaps.round(3).to_string(index=False))
 
     bets = value_bets(predictions, OUR_MODELS)
-    bets.to_csv(style.RESULTS_DIR / "error_value_bets.csv", index=False, float_format="%.4f")
+    bets.to_csv(style.RESULTS_DIR / "error_value_bets.csv", index=False, float_format="%.5f")
     print("\nBetting one unit wherever a model sees more than 5% expected value at the closing odds:")
     print(bets.round(3).to_string(index=False))
 
@@ -295,7 +295,7 @@ def main(argv: list[str] | None = None) -> None:
 
     misses = biggest_misses(predictions, best)
     misses.to_csv(style.RESULTS_DIR / "error_biggest_misses.csv", index=False, date_format="%Y-%m-%d",
-                  float_format="%.4f")
+                  float_format="%.5f")
     print("\nThe ten results the model thought least likely:")
     print(misses.assign(date=misses["date"].dt.strftime("%Y-%m-%d")).round(3).to_string(index=False))
 
